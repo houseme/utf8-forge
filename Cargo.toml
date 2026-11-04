@@ -1,0 +1,45 @@
+[package]
+name = "utf8-forge"
+version = "0.1.0"
+edition = "2024"
+description = "A focused, idempotent, bidirectional charset transcoder for source trees. Default output: UTF-8 without BOM."
+license = "Apache-2.0"
+authors = ["houseme"]
+repository = "https://github.com/houseme/utf8-forge"
+keywords = ["encoding", "utf-8", "gb18030", "charset", "transcode"]
+categories = ["command-line-utilities", "text-processing"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "AGENT.md",
+    "src/**",
+]
+
+[[bin]]
+name = "utf8-forge"
+path = "src/main.rs"
+
+[lib]
+name = "utf8_forge"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+encoding_rs = "0.8"
+rayon = "1.12"
+reqwest = { version = "0.13", features = ["blocking"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+url = "2.5"
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[features]
+default = ["remote"]
+remote = ["reqwest"]
