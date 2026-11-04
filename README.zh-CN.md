@@ -1,6 +1,10 @@
-# README.zh-CN.md（中文版）
-
 # utf8-forge
+
+[![Crates.io](https://img.shields.io/crates/v/utf8-forge.svg)](https://crates.io/crates/utf8-forge)
+[![Documentation](https://docs.rs/utf8-forge/badge.svg)](https://docs.rs/utf8-forge)
+[![CI](https://github.com/houseme/utf8-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/houseme/utf8-forge/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](#rust-工具链兼容性)
 
 > 面向 Windows 源码树的 **聚焦、幂等、双向**字符集转换器。
 > 默认输出： **UTF-8 无 BOM**。
@@ -41,6 +45,9 @@
 ## 安装
 
 ```bash
+# 从 crates.io 安装
+cargo install utf8-forge
+
 # 从源码安装
 cargo install --path . --locked
 
@@ -122,6 +129,13 @@ C/C++（`.c .cc .cpp .cxx .h .hh .hpp .hxx .inl .ipp .tpp`）、.NET（`.cs`）�
 **默认不含**：`.rc`、`.sln`、`.vcxproj` —— 用 `--include-rc` / `--include-msbuild` 显式开启。
 
 默认排除：`dep/`、`_tools/`、`.svn/`、`.git/`、`build/`、`temp/`、`OutputFile*/`、`node_modules/`、`__pycache__/` 等。
+
+---
+
+## Rust 工具链兼容性
+
+`utf8-forge` 跟随 **Rust stable**（edition 2024）。实现使用了需要较新工具链的稳定语言特性 —— **stable Rust 1.88
+及以上**均可构建。不固定 MSRV：跟随当前 stable 而非维护最低版本保证，CI 在每次推送时以最新 stable 工具链验证。
 
 ---
 

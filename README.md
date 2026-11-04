@@ -1,6 +1,10 @@
-# README.md (English — default)
-
 # utf8-forge
+
+[![Crates.io](https://img.shields.io/crates/v/utf8-forge.svg)](https://crates.io/crates/utf8-forge)
+[![Documentation](https://docs.rs/utf8-forge/badge.svg)](https://docs.rs/utf8-forge)
+[![CI](https://github.com/houseme/utf8-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/houseme/utf8-forge/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](#rust-toolchain-compatibility)
 
 > A focused, idempotent, bidirectional charset transcoder for Windows source trees.
 > Default output: **UTF-8 without BOM**.
@@ -41,6 +45,9 @@ Mixed-encoding source trees (GB18030 / UTF-8 / UTF-8 BOM / UTF-16) cause:
 ## Install
 
 ```bash
+# From crates.io
+cargo install utf8-forge
+
 # From source
 cargo install --path . --locked
 
@@ -124,6 +131,14 @@ Python (`.py`), JS/TS (`.js .jsx .ts .tsx`), Shell (`.sh .bash .ps1 .bat`), Conf
 
 Excluded by default: `dep/`, `_tools/`, `.svn/`, `.git/`, `build/`, `temp/`, `OutputFile*/`, `node_modules/`,
 `__pycache__/`, etc.
+
+---
+
+## Rust Toolchain Compatibility
+
+`utf8-forge` tracks **Rust stable** (edition 2024). It uses stable language features that require a reasonably recent
+toolchain — any **stable Rust 1.88 or newer** builds the crate. No MSRV is pinned; CI validates the latest stable
+toolchain on every push.
 
 ---
 
