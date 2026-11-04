@@ -1,6 +1,6 @@
 [package]
 name = "utf8-forge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A focused, idempotent, bidirectional charset transcoder for source trees. Default output: UTF-8 without BOM."
 license = "Apache-2.0"
