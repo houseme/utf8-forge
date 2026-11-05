@@ -7,6 +7,13 @@
 
 ---
 
+## Release record
+
+- **v0.2.0** released 2026-11-05: tag `v0.2.0` → Release workflow green →
+  GitHub Release with 5 platform archives (+ sha256) → crates.io `0.2.0` live →
+  docs.rs build OK. Artifact smoke-tested on aarch64-apple-darwin (checksum
+  verified, rollout loop scan→convert→verify passed on a mixed tree).
+
 ## Status legend
 
 `[ ]` open · `[~]` in progress · `[x]` done (with verification) · `[-]` rejected (with rationale)
