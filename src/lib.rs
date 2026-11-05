@@ -1609,7 +1609,11 @@ mod backup_placement_tests {
 
     #[test]
     fn relative_backup_dir_resolves_against_cwd() {
-        let cwd = std::env::current_dir().unwrap();
+        // The root argument must be canonicalized, exactly as the real
+        // caller passes it: on Windows canonicalize yields a `\\?\`
+        // verbatim prefix, so a plain current_dir() would never compare
+        // equal to the projected path.
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
         // A not-yet-created relative dir lands under the cwd, outside a root
         // elsewhere.
         check_backup_placement(Path::new("backup"), &cwd.join("elsewhere-root")).unwrap();
