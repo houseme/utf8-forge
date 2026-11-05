@@ -111,10 +111,13 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
         .iter()
         .map(|f| f["path"].as_str().unwrap())
         .collect();
-    assert!(paths.iter().all(|p| !p.contains("dep/")
-        && !p.contains(".hidden")
-        && !p.contains("OutputFile1")
-        && !p.contains("image.png")));
+    assert!(paths.iter().all(|p| {
+        let p = p.replace('\\', "/");
+        !p.contains("dep/")
+            && !p.contains(".hidden")
+            && !p.contains("OutputFile1")
+            && !p.contains("image.png")
+    }));
     // Invariant #8: report files sorted by path.
     let mut sorted = paths.clone();
     sorted.sort();
@@ -135,7 +138,7 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
         .iter()
         .map(|f| {
             let p = f["path"].as_str().unwrap();
-            let name = p.rsplit('/').next().unwrap();
+            let name = Path::new(p).file_name().unwrap().to_str().unwrap();
             (name, f["action"].as_str().unwrap())
         })
         .collect();
@@ -212,13 +215,9 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
     assert_eq!(doc["mode"], "verify");
     assert_eq!(doc["summary"]["passed"], 5);
     assert_eq!(doc["summary"]["failed"], 1);
+    let error_path = doc["error_files"][0].as_str().unwrap();
     assert_eq!(
-        doc["error_files"][0]
-            .as_str()
-            .unwrap()
-            .rsplit('/')
-            .next()
-            .unwrap(),
+        Path::new(error_path).file_name().unwrap().to_str().unwrap(),
         "unknown.cpp"
     );
 
@@ -626,7 +625,10 @@ fn ignore_file_semantics() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["path"].as_str().unwrap().rsplit('/').next().unwrap())
+        .map(|f| {
+            let p = f["path"].as_str().unwrap();
+            Path::new(p).file_name().unwrap().to_str().unwrap()
+        })
         .collect();
     assert!(paths.contains(&"keep.md"), "{paths:?}");
     assert!(!paths.contains(&"drop.md"), "{paths:?}");
