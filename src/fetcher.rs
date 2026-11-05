@@ -119,7 +119,7 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
 /// - a segment without an extension gets `.utf8` appended (`.../foo` → `foo.utf8`);
 /// - no usable segment → `download.utf8`.
 pub fn derive_output_path(url: &str) -> PathBuf {
-    let segment = url::Url::parse(url).ok().and_then(|u| {
+    let segment = reqwest::Url::parse(url).ok().and_then(|u| {
         u.path_segments()?
             .next_back()
             .map(str::to_owned)

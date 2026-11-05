@@ -449,7 +449,7 @@ fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
 }
 
 fn derive_output_path(url: &str) -> PathBuf {
-    let segment = url::Url::parse(url).ok().and_then(|u| {
+    let segment = reqwest::Url::parse(url).ok().and_then(|u| {
         u.path_segments()?.next_back().map(str::to_owned).filter(|s| !s.is_empty())
     });
     match segment {
@@ -551,7 +551,6 @@ reqwest = { version = "0.13.5", features = ["blocking"], optional = true }  # la
 serde = { version = "1.0.229", features = ["derive"] }  # latest
 serde_json = "1.0.154"          # latest
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }  # config file (§5.5)
-url = "2.5"              # for path derivation
 walkdir = "2.5.0"            # latest
 
 [dev-dependencies]
