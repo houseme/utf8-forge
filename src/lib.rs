@@ -784,6 +784,16 @@ fn ensure_backup_dir(args: &impl ConvertOptions) -> anyhow::Result<()> {
 /// exist: canonicalize the deepest existing ancestor, then re-attach the
 /// non-existing tail. Fatal when the projected path lands inside `root`.
 fn check_backup_placement(dir: &Path, root_canonical: &Path) -> anyhow::Result<()> {
+    // A relative dir such as `backup` targets a location under the process
+    // cwd; resolve it first so the ancestor walk starts from an existing
+    // base instead of failing on a not-yet-created relative tail.
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| format!("cannot resolve relative --backup-dir `{}`", dir.display()))?
+            .join(dir)
+    };
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = dir.to_path_buf();
     let base = loop {
@@ -1590,4 +1600,23 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     } else {
         0
     })
+}
+
+#[cfg(test)]
+mod backup_placement_tests {
+    use super::check_backup_placement;
+    use std::path::Path;
+
+    #[test]
+    fn relative_backup_dir_resolves_against_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        // A not-yet-created relative dir lands under the cwd, outside a root
+        // elsewhere.
+        check_backup_placement(Path::new("backup"), &cwd.join("elsewhere-root")).unwrap();
+        // Deep non-existing relative tails resolve through the cwd too.
+        check_backup_placement(Path::new("a/b/c"), &cwd.join("elsewhere-root")).unwrap();
+        // The same relative dir is fatal when the cwd itself is the root.
+        let err = check_backup_placement(Path::new("backup"), &cwd).unwrap_err();
+        assert!(err.to_string().contains("inside"), "{err}");
+    }
 }
