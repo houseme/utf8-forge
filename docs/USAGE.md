@@ -1,5 +1,3 @@
-# docs/USAGE.md (English)
-
 # utf8-forge — Full Usage Guide
 
 > Complete CLI reference, recipes, and operational notes.
@@ -134,29 +132,29 @@ Exit codes:
 
 ## 3. Options
 
-| Flag                       | Default         | Notes                                                            |
-|----------------------------|-----------------|------------------------------------------------------------------|
-| `-r, --root <PATH>`        | `.`             | Recursive root                                                   |
-| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`) |
-| `-x, --exclude <LIST>`     | see DESIGN §5.2 | Appended to default excludes                                     |
-| `-X, --exclude-ext <LIST>` | empty           | Appended                                                         |
+| Flag                       | Default         | Notes                                                                                                                                                                      |
+|----------------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `-r, --root <PATH>`        | `.`             | Recursive root                                                                                                                                                             |
+| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`)                                                                                                    |
+| `-x, --exclude <LIST>`     | see DESIGN §5.2 | Appended to default excludes                                                                                                                                               |
+| `-X, --exclude-ext <LIST>` | empty           | Appended                                                                                                                                                                   |
 | `--exclude-glob <GLOB>`    | empty           | Repeatable. Case-insensitive glob over root-relative path components; `/`-separated, `\` accepted; `**` spans components, `*`/`?` match within one; empty pattern → exit 2 |
-| `--include-rc`             | false           | Adds `.rc/.rc2/.dlg`                                             |
-| `--include-msbuild`        | false           | Adds `.sln/.vcxproj/...`                                         |
-| `--include-hidden`         | false           | Processes dot-prefixed files and directories                     |
-| `--config <PATH>`          | none            | TOML config supplying defaults; CLI flags override config values; missing/malformed file or unknown keys → exit 2 (ignored by fetch mode) |
-| `--ignore-file <PATH>`     | auto            | Gitignore-style exclusions; fatal (exit 2) when the explicit file is missing; replaces auto-discovery of `<root>/.utf8forgeignore` |
-| `--no-ignore-file`         | false           | Disables ignore-file handling entirely, including auto-discovery |
-| `-t, --target <ENC>`       | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert, fix)    |
-| `--dry-run`                | false           | No writes (convert, fix)                                         |
-| `--backup-dir <PATH>`      | none            | Backup before overwrite (convert, fix)                           |
-| `--max-file-size <BYTES>`  | 200 MiB         | Skip oversized                                                   |
-| `--threads <N>`            | CPU count       | Rayon pool; `0` clamps to `1`                                    |
-| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning |
-| `--url <URL>`              | none            | **Remote fetch (convert only)**; ignores `--root`                |
-| `--output <PATH>`          | derived         | Destination for `--url`                                          |
-| `-q, --quiet`              | false           | Errors only                                                      |
-| `-v, --verbose`            | false           | Per-file detail                                                  |
+| `--include-rc`             | false           | Adds `.rc/.rc2/.dlg`                                                                                                                                                       |
+| `--include-msbuild`        | false           | Adds `.sln/.vcxproj/...`                                                                                                                                                   |
+| `--include-hidden`         | false           | Processes dot-prefixed files and directories                                                                                                                               |
+| `--config <PATH>`          | none            | TOML config supplying defaults; CLI flags override config values; missing/malformed file or unknown keys → exit 2 (ignored by fetch mode)                                  |
+| `--ignore-file <PATH>`     | auto            | Gitignore-style exclusions; fatal (exit 2) when the explicit file is missing; replaces auto-discovery of `<root>/.utf8forgeignore`                                         |
+| `--no-ignore-file`         | false           | Disables ignore-file handling entirely, including auto-discovery                                                                                                           |
+| `-t, --target <ENC>`       | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert, fix)                                                                                                              |
+| `--dry-run`                | false           | No writes (convert, fix)                                                                                                                                                   |
+| `--backup-dir <PATH>`      | none            | Backup before overwrite (convert, fix)                                                                                                                                     |
+| `--max-file-size <BYTES>`  | 200 MiB         | Skip oversized                                                                                                                                                             |
+| `--threads <N>`            | CPU count       | Rayon pool; `0` clamps to `1`                                                                                                                                              |
+| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning                                                                                            |
+| `--url <URL>`              | none            | **Remote fetch (convert only)**; ignores `--root`                                                                                                                          |
+| `--output <PATH>`          | derived         | Destination for `--url`                                                                                                                                                    |
+| `-q, --quiet`              | false           | Errors only                                                                                                                                                                |
+| `-v, --verbose`            | false           | Per-file detail                                                                                                                                                            |
 
 **Per-command flag surface**: `--target`, `--dry-run` and `--backup-dir` exist
 on `convert` and `fix`. `scan` and `verify` reject them (clap error, exit 2).
@@ -171,8 +169,8 @@ Conflicts (fatal, exit 2):
 
 **Notes**:
 
-- (a) `-e/--ext` **replaces** the default whitelist; the opt-in flags
-  (`--include-rc` / `--include-msbuild`) only extend the default set and have
+- (a) `-e/--ext` **replaces** the default whitelist; the opt-in flags (`--include-rc` / `--include-msbuild`) only extend
+  the default set and have
   no effect together with `-e`.
 - (b) `--backup-dir` cannot be combined with `--url` (fatal, exit 2).
 - (c) `--backup-dir` inside `--root` is rejected (fatal, exit 2); an existing
@@ -182,8 +180,8 @@ Conflicts (fatal, exit 2):
 - (f) `--report` parent dirs are created; the report path itself is excluded
   from scanning.
 - (g) read-only files are refused with an io error, never overwritten.
-- (h) ignore file: an explicit `--ignore-file` that is missing is fatal
-  (exit 2); auto-discovery of `<root>/.utf8forgeignore` (flag absent) is
+- (h) ignore file: an explicit `--ignore-file` that is missing is fatal (exit 2); auto-discovery of
+  `<root>/.utf8forgeignore` (flag absent) is
   silent when missing and warns + continues when unreadable;
   `--no-ignore-file` disables both. The ignore file is an independent
   exclusion layer: `!` negation lifts only the ignore layer, never the
@@ -336,9 +334,8 @@ max_file_size = 209715200
 threads = 8
 ```
 
-Precedence is CLI > config > defaults. List values REPLACE across layers
-(never concatenate). Missing, malformed, or unknown-key files are fatal
-(exit 2) — messages carry the TOML line/column. `root`, `report`, `dry-run`,
+Precedence is CLI > config > defaults. List values REPLACE across layers (never concatenate). Missing, malformed, or
+unknown-key files are fatal (exit 2) — messages carry the TOML line/column. `root`, `report`, `dry-run`,
 `url`, `output`, and quiet/verbose are deliberately absent from the schema;
 fetch mode ignores `--config`.
 
@@ -385,11 +382,11 @@ with `--target gb18030`, untouched ASCII files count too.
 
 ## 7. Exit Codes
 
-| Code | Meaning                                                                                     |
-|------|---------------------------------------------------------------------------------------------|
-| 0    | Success (`diff`: comparison finished — differences do not change the exit code unless `--fail-on-change`) |
-| 1    | Non-fatal per-file issues (`unknown`, `decode_error`, `io_error`; convert: also `fetch_error`, oversized `--url` payload); `diff --fail-on-change`: the reports differ |
-| 2    | Fatal in every command (bad args, missing root, flag conflicts, I/O setup failure); also emitted by clap; `diff`: missing/malformed input report |
+| Code | Meaning                                                                                                                                                                        |
+|------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0    | Success (`diff`: comparison finished — differences do not change the exit code unless `--fail-on-change`)                                                                      |
+| 1    | Non-fatal per-file issues (`unknown`, `decode_error`, `io_error`; convert: also `fetch_error`, oversized `--url` payload); `diff --fail-on-change`: the reports differ         |
+| 2    | Fatal in every command (bad args, missing root, flag conflicts, I/O setup failure); also emitted by clap; `diff`: missing/malformed input report                               |
 | 3    | `verify` found non-UTF-8 whitelisted files; `fix`: any file fails the verify gate (oversized/unreadable count as failed — fail-closed; the gate wins over convert-side issues) |
 
 ---

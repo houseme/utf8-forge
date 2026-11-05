@@ -1,5 +1,3 @@
-# docs/USAGE.zh-CN.md（中文版）
-
 # utf8-forge — 完整使用指南
 
 > 完整 CLI 参考、配方与运维注意事项。
@@ -118,7 +116,7 @@ utf8-forge diff --before a.json --after b.json --report diff.json
 
 退出码：
 
-- `0` —— 对比完成（存在差异**不**改变退出码）；
+- `0` —— 对比完成（存在差异 **不**改变退出码）；
 - `1` —— 指定 `--fail-on-change` 且 diff 非空（added + removed +
   changed > 0）；
 - `2` —— 输入报告缺失或格式错误。
@@ -127,29 +125,29 @@ utf8-forge diff --before a.json --after b.json --report diff.json
 
 ## 3. 选项
 
-| 参数                       | 默认           | 说明                                                             |
-|----------------------------|----------------|------------------------------------------------------------------|
-| `-r, --root <PATH>`        | `.`            | 递归根                                                           |
-| `-e, --ext <LIST>`         | 见 DESIGN §5.1 | **替换**默认白名单；自动去除前导点（`.cpp` 等同 `cpp`）          |
-| `-x, --exclude <LIST>`     | 见 DESIGN §5.2 | 追加到默认排除                                                   |
-| `-X, --exclude-ext <LIST>` | 空             | 追加                                                             |
+| 参数                       | 默认           | 说明                                                                                                                              |
+|----------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `-r, --root <PATH>`        | `.`            | 递归根                                                                                                                            |
+| `-e, --ext <LIST>`         | 见 DESIGN §5.1 | **替换**默认白名单；自动去除前导点（`.cpp` 等同 `cpp`）                                                                           |
+| `-x, --exclude <LIST>`     | 见 DESIGN §5.2 | 追加到默认排除                                                                                                                    |
+| `-X, --exclude-ext <LIST>` | 空             | 追加                                                                                                                              |
 | `--exclude-glob <GLOB>`    | 空             | 可多次。对相对根的路径组件做大小写不敏感的 glob 匹配；以 `/` 分隔，接受 `\`；`**` 跨组件，`*`/`?` 匹配单组件内；空模式 → 退出码 2 |
-| `--include-rc`             | false          | 纳入 `.rc/.rc2/.dlg`                                             |
-| `--include-msbuild`        | false          | 纳入 `.sln/.vcxproj/...`                                         |
-| `--include-hidden`         | false          | 处理点前缀的文件与目录                                           |
-| `--config <PATH>`          | 无             | 提供默认值的 TOML 配置；CLI 旗标覆盖配置值；文件缺失/格式错误/未知键 → 退出码 2（fetch 模式忽略） |
-| `--ignore-file <PATH>`     | 自动           | gitignore 风格排除；显式指定但文件缺失 → 致命（退出码 2）；指定后替换 `<root>/.utf8forgeignore` 的自动发现 |
-| `--no-ignore-file`         | false          | 完全禁用 ignore 文件，包括自动发现                               |
-| `-t, --target <ENC>`       | `utf-8`        | `utf-8-bom`、`gb18030`、`utf-16le`、`utf-16be`（convert、fix）   |
-| `--dry-run`                | false          | 不写盘（convert、fix）                                           |
-| `--backup-dir <PATH>`      | 无             | 覆盖前备份（convert、fix）                                       |
-| `--max-file-size <BYTES>`  | 200 MiB        | 超限跳过                                                         |
-| `--threads <N>`            | CPU 核数       | Rayon 池；`0` 视为 `1`                                           |
-| `--report <PATH>`          | 无             | JSON 报告；自动创建父目录，报告路径本身会从扫描中排除            |
-| `--url <URL>`              | 无             | **远程抓取（仅 convert）**；忽略 `--root`                        |
-| `--output <PATH>`          | 派生           | `--url` 的目标路径                                               |
-| `-q, --quiet`              | false          | 仅报错误                                                         |
-| `-v, --verbose`            | false          | 逐文件细节                                                       |
+| `--include-rc`             | false          | 纳入 `.rc/.rc2/.dlg`                                                                                                              |
+| `--include-msbuild`        | false          | 纳入 `.sln/.vcxproj/...`                                                                                                          |
+| `--include-hidden`         | false          | 处理点前缀的文件与目录                                                                                                            |
+| `--config <PATH>`          | 无             | 提供默认值的 TOML 配置；CLI 旗标覆盖配置值；文件缺失/格式错误/未知键 → 退出码 2（fetch 模式忽略）                                 |
+| `--ignore-file <PATH>`     | 自动           | gitignore 风格排除；显式指定但文件缺失 → 致命（退出码 2）；指定后替换 `<root>/.utf8forgeignore` 的自动发现                        |
+| `--no-ignore-file`         | false          | 完全禁用 ignore 文件，包括自动发现                                                                                                |
+| `-t, --target <ENC>`       | `utf-8`        | `utf-8-bom`、`gb18030`、`utf-16le`、`utf-16be`（convert、fix）                                                                    |
+| `--dry-run`                | false          | 不写盘（convert、fix）                                                                                                            |
+| `--backup-dir <PATH>`      | 无             | 覆盖前备份（convert、fix）                                                                                                        |
+| `--max-file-size <BYTES>`  | 200 MiB        | 超限跳过                                                                                                                          |
+| `--threads <N>`            | CPU 核数       | Rayon 池；`0` 视为 `1`                                                                                                            |
+| `--report <PATH>`          | 无             | JSON 报告；自动创建父目录，报告路径本身会从扫描中排除                                                                             |
+| `--url <URL>`              | 无             | **远程抓取（仅 convert）**；忽略 `--root`                                                                                         |
+| `--output <PATH>`          | 派生           | `--url` 的目标路径                                                                                                                |
+| `-q, --quiet`              | false          | 仅报错误                                                                                                                          |
+| `-v, --verbose`            | false          | 逐文件细节                                                                                                                        |
 
 **子命令旗标面**：`--target`、`--dry-run`、`--backup-dir` 由 `convert` 与
 `fix` 支持。`scan` 与 `verify` 会拒绝这些旗标（clap 报错，退出码 2）。
@@ -176,7 +174,7 @@ utf8-forge diff --before a.json --after b.json --report diff.json
   `--no-ignore-file` 两者皆禁。ignore 文件是独立的排除层：`!` 否定只解除
   ignore 层，绝不影响白名单 / `--exclude` / `--exclude-glob` 层。ignore 文件
   本身永远不会被扫描。
-- (i) 配置文件：优先级 CLI > 配置 > 内置默认；列表值跨层**替换**（绝不拼接）。
+- (i) 配置文件：优先级 CLI > 配置 > 内置默认；列表值跨层 **替换**（绝不拼接）。
   `--target` 与 `--max-file-size` 仅在旗标实际传入时取 CLI 值，否则取配置值，
   否则取默认值。fetch 模式忽略 `--config`。
 
@@ -195,7 +193,7 @@ UTF-8 BOM → UTF-32 LE BOM → UTF-32 BE BOM → UTF-16 LE BOM → UTF-16 BE BO
 失败（`decode_error`，绝不产生静默乱码）。
 
 UTF-32 为只读：严格解码拒绝代理区码元、大于 `0x10FFFF` 的标量值，以及错位
-尾部（BOM 之后载荷长度不是 4 的倍数）。**没有** UTF-32 写入目标
+尾部（BOM 之后载荷长度不是 4 的倍数）。 **没有** UTF-32 写入目标
 （`--target utf-32le` → 退出码 2），`verify` 会判定 UTF-32 文件失败
 （它们不是 UTF-8）。
 
@@ -318,7 +316,7 @@ max_file_size = 209715200
 threads = 8
 ```
 
-优先级为 CLI > 配置 > 默认。列表值跨层**替换**（绝不拼接）。文件缺失、格式
+优先级为 CLI > 配置 > 默认。列表值跨层 **替换**（绝不拼接）。文件缺失、格式
 错误或含未知键均为致命（退出码 2）—— 错误信息携带 TOML 行/列。
 `root`、`report`、`dry-run`、`url`、`output` 与 quiet/verbose 被有意排除在
 schema 之外；fetch 模式忽略 `--config`。
@@ -333,31 +331,36 @@ JSON schema 见 `EXECUTION.md §12`。
 
 - `summary.total_files` —— 遍历到的全部文件；
 - `summary.candidates` —— 命中白名单；
-- `files[].action` —— 完整列表：`detected` | `passed` | `failed` | `would_convert` | `converted` | `unchanged` | `skipped_unknown` | `skipped_too_large` | `error`；
-- `unknown_files` —— 检测为 `unknown`（任何模式）或 convert 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或 verify `failed`（同一文件可能同时出现在两者中；fix 模式下 verify 失败仅记录在 `verify_failed_files` 中）；
+- `files[].action` —— 完整列表：`detected` | `passed` | `failed` | `would_convert` | `converted` | `unchanged` |
+  `skipped_unknown` | `skipped_too_large` | `error`；
+- `unknown_files` —— 检测为 `unknown`（任何模式）或 convert 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或
+  verify `failed`（同一文件可能同时出现在两者中；fix 模式下 verify 失败仅记录在 `verify_failed_files` 中）；
 - `verify_failed_files` —— 仅 fix 模式：verify 记录为 `failed` 的路径；门禁干净时省略；
 - `options.ignore_file` —— 生效的 ignore 规则（显式路径原样记录，或自动发现的 `<root>/.utf8forgeignore`）；无规则生效时省略；
 - `options.config_file` —— `--config` 的值原样记录；未指定时省略。
 
 `summary` 按模式区分：
 
-- `scan` —— 编码分布：`utf8` / `utf8_bom` / `utf16le` / `utf16be` / `utf32le` / `utf32be` / `gb18030` / `unknown` / `errors` / `too_large`（外加 `total_files` / `candidates`；`errors` 统计不可读文件，满足 buckets + errors + too_large == candidates）；
+- `scan` —— 编码分布：`utf8` / `utf8_bom` / `utf16le` / `utf16be` / `utf32le` / `utf32be` / `gb18030` / `unknown` /
+  `errors` / `too_large`（外加 `total_files` / `candidates`；`errors` 统计不可读文件，满足 buckets + errors + too_large ==
+  candidates）；
 - `verify` —— 门禁结果：`passed` / `failed`；
-- `convert` / `fetch` —— 结果计数：`already_utf8` / `converted` / `unknown` / `decode_errors` / `io_errors` / `too_large` / `fetch_error`；
+- `convert` / `fetch` —— 结果计数：`already_utf8` / `converted` / `unknown` / `decode_errors` / `io_errors` /
+  `too_large` / `fetch_error`；
 - `fix` —— 转换计数（同上，但无 `fetch_error`）外加对同一棵树验证得到的 `passed` / `failed`。
 
-`already_utf8` 统计在**目标**编码下字节已完全一致的文件：使用 `--target gb18030` 时，未改动的纯 ASCII 文件也计入。
+`already_utf8` 统计在 **目标**编码下字节已完全一致的文件：使用 `--target gb18030` 时，未改动的纯 ASCII 文件也计入。
 
 ---
 
 ## 7. 退出码
 
-| 码 | 含义                                                                                      |
-|----|-------------------------------------------------------------------------------------------|
-| 0  | 成功（`diff`：对比完成 —— 除非指定 `--fail-on-change`，差异不改变退出码）                  |
+| 码 | 含义                                                                                                                                                  |
+|----|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0  | 成功（`diff`：对比完成 —— 除非指定 `--fail-on-change`，差异不改变退出码）                                                                             |
 | 1  | 非致命单文件问题（`unknown`、`decode_error`、`io_error`；convert 还包括 `fetch_error`、超限 `--url` 载荷）；`diff --fail-on-change`：两份报告存在差异 |
-| 2  | 所有命令的致命错误（参数错误、root 缺失、旗标冲突、I/O 初始化失败）；clap 也会产生；`diff`：输入报告缺失或格式错误 |
-| 3  | `verify` 发现白名单内非 UTF-8 文件；`fix`：任一文件未通过验证门禁（超限/不可读计为失败 —— fail-closed；门禁优先于转换侧问题） |
+| 2  | 所有命令的致命错误（参数错误、root 缺失、旗标冲突、I/O 初始化失败）；clap 也会产生；`diff`：输入报告缺失或格式错误                                    |
+| 3  | `verify` 发现白名单内非 UTF-8 文件；`fix`：任一文件未通过验证门禁（超限/不可读计为失败 —— fail-closed；门禁优先于转换侧问题）                         |
 
 ---
 
