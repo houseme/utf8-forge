@@ -29,6 +29,9 @@ pub enum ForgeError {
     /// A legal encoding was detected but the byte stream is malformed
     /// (`had_errors == true` from `encoding_rs`). Never half-decoded.
     DecodeError(String),
+    /// The decoded text cannot be encoded into the requested target without
+    /// producing bytes the tool could not re-read on the next run.
+    EncodeError(String),
     /// File (or remote payload) exceeds `--max-file-size`.
     TooLarge { size: u64, max: u64 },
     /// Local filesystem failure (permissions, locked file, ...).
@@ -44,6 +47,7 @@ impl ForgeError {
         match self {
             ForgeError::UnknownEncoding => "unknown",
             ForgeError::DecodeError(_) => "decode_error",
+            ForgeError::EncodeError(_) => "encode_error",
             ForgeError::TooLarge { .. } => "too_large",
             ForgeError::Io(_) => "io_error",
             ForgeError::Fetch(_) => "fetch_error",
@@ -56,6 +60,7 @@ impl fmt::Display for ForgeError {
         match self {
             ForgeError::UnknownEncoding => write!(f, "unknown encoding (never guessed)"),
             ForgeError::DecodeError(detail) => write!(f, "strict decode failed: {detail}"),
+            ForgeError::EncodeError(detail) => write!(f, "strict encode failed: {detail}"),
             ForgeError::TooLarge { size, max } => {
                 write!(f, "file too large: {size} bytes > --max-file-size {max}")
             }
@@ -66,11 +71,10 @@ impl fmt::Display for ForgeError {
 }
 
 impl std::error::Error for ForgeError {
+    // The io cause is already spelled out by `Display`; re-exposing it as
+    // `source()` would make anyhow-style `{err:#}` chains print it twice.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ForgeError::Io(e) => Some(e),
-            _ => None,
-        }
+        None
     }
 }
 
@@ -90,6 +94,10 @@ mod tests {
         assert_eq!(
             ForgeError::DecodeError("x".into()).category(),
             "decode_error"
+        );
+        assert_eq!(
+            ForgeError::EncodeError("x".into()).category(),
+            "encode_error"
         );
         assert_eq!(
             ForgeError::TooLarge { size: 10, max: 5 }.category(),

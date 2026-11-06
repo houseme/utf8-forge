@@ -76,10 +76,13 @@ impl DetectedEncoding {
 ///
 /// The UTF-32 BOMs (`FF FE 00 00` LE / `00 00 FE FF` BE) are checked before
 /// the 2-byte UTF-16 BOMs (longest-prefix precedence, as in WHATWG BOM
-/// sniffing). Documented consequence: a UTF-16LE file whose first character
-/// is U+0000 shares its leading bytes with the UTF-32LE BOM; such a payload
-/// fails the strict UTF-32 decode loudly (`decode_error`) instead of being
-/// silently transcoded, so a detection ambiguity never produces mojibake.
+/// sniffing). Consequence of that precedence: a file starting `FF FE 00 00`
+/// is always read as UTF-32LE, even when the bytes would also decode as
+/// UTF-16LE whose first character is U+0000 — the two encodings are
+/// indistinguishable there. To keep such files from ever being created, the
+/// UTF-16LE encoder refuses content that begins with U+0000 (the transcoder
+/// reports `encode_error`), and malformed UTF-32 payloads still fail the
+/// strict decode loudly (`decode_error`) instead of being transcoded.
 pub fn detect(bytes: &[u8]) -> DetectedEncoding {
     if bytes.is_empty() {
         return DetectedEncoding::Utf8;

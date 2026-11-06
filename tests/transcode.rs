@@ -49,7 +49,7 @@ fn utf8bom_to_utf8_strips_bom_and_is_idempotent() {
 
 #[test]
 fn gbk_to_utf8_to_gbk_round_trip_is_byte_lossless() {
-    // G3 acceptance: A→B→A == A.
+    // Round-tripping through UTF-8 must reproduce the exact input bytes.
     let to_utf8 = transcode(GBK_NIHAO, TargetEncoding::Utf8).unwrap();
     let utf8 = match &to_utf8 {
         TranscodeOutcome::Changed(v) => v.clone(),
@@ -99,7 +99,7 @@ fn utf16be_round_trip_with_manual_bom() {
 
 #[test]
 fn crlf_survives_utf16_round_trip() {
-    // Invariant #3: no newline normalization.
+    // Line endings are preserved verbatim (no newline normalization).
     let text = b"a\r\nb\r\n";
     let le = match transcode(text, TargetEncoding::Utf16Le).unwrap() {
         TranscodeOutcome::Changed(v) => v,
@@ -141,7 +141,7 @@ fn gbk_target_of_already_gbk_bytes_is_unchanged() {
 
 #[test]
 fn utf8_target_converges_every_valid_source() {
-    // Invariant #10: after one pass everything is plain UTF-8, so the second
+    // After one pass everything is plain UTF-8, so the second
     // pass must be a no-op for every target combination.
     let sources: Vec<Vec<u8>> = vec![
         b"plain ascii".to_vec(),
@@ -332,4 +332,55 @@ fn utf32be_chinese_round_trips() {
 fn utf32_is_never_a_write_target() {
     assert_eq!(TargetEncoding::parse("utf-32le"), None);
     assert_eq!(TargetEncoding::parse("utf-32be"), None);
+}
+
+#[test]
+fn utf16le_target_refuses_nul_leading_content() {
+    // The output would begin `FF FE 00 00`, which the next run reads back as
+    // the UTF-32LE BOM — so the encoder refuses instead of writing a file it
+    // could never re-read as UTF-16.
+    let err = transcode(b"\x00B\n", TargetEncoding::Utf16Le).unwrap_err();
+    assert_eq!(err.category(), "encode_error");
+    // The big-endian BOM `FE FF 00 00` re-reads as UTF-16BE, so NUL-leading
+    // content is fine there.
+    match transcode(b"\x00B\n", TargetEncoding::Utf16Be).unwrap() {
+        TranscodeOutcome::Changed(v) => {
+            assert_eq!(&v[..4], &[0xFE, 0xFF, 0x00, 0x00]);
+        }
+        TranscodeOutcome::Unchanged => panic!("utf-8 content must change to utf-16be"),
+    }
+}
+
+#[test]
+fn utf16le_nul_leading_file_is_never_produced_by_second_pass() {
+    // A UTF-16LE file whose first character is U+0000 detects as UTF-32LE on
+    // the next run; re-targeting it to utf-16le must not silently rewrite the
+    // mis-decoded text into different UTF-16 bytes.
+    let bytes = [0xFF, 0xFE, 0x00, 0x00, 0x42, 0x00]; // reads as UTF-32LE BOM + payload
+    let det = detect(&bytes);
+    assert_eq!(det, DetectedEncoding::Utf32Le);
+    // Whatever the decode verdict, an encode to utf-16le of NUL-leading text
+    // is refused — the corrupting second pass from the old behavior is gone.
+    let text = "\u{0}B";
+    let err = transcode(text.as_bytes(), TargetEncoding::Utf16Le).unwrap_err();
+    assert_eq!(err.category(), "encode_error");
+}
+
+#[test]
+fn gb18030_four_byte_round_trip_is_lossless() {
+    // U+20000 needs the 4-byte GB18030 sequence; astral content must survive
+    // the full GB18030 → UTF-8 → GB18030 cycle.
+    let u20000 = "\u{20000}";
+    let to_gb = transcode(u20000.as_bytes(), TargetEncoding::Gb18030).unwrap();
+    let gb_bytes = match &to_gb {
+        TranscodeOutcome::Changed(v) => v.clone(),
+        TranscodeOutcome::Unchanged => panic!("utf-8 astral text must change to gb18030"),
+    };
+    assert_eq!(gb_bytes.len(), 4, "U+20000 uses the 4-byte GB18030 form");
+    assert_eq!(detect(&gb_bytes), DetectedEncoding::Gb18030);
+    let back = transcode(&gb_bytes, TargetEncoding::Utf8).unwrap();
+    match back {
+        TranscodeOutcome::Changed(v) => assert_eq!(v, u20000.as_bytes().to_vec()),
+        TranscodeOutcome::Unchanged => panic!("gb18030 must decode back to utf-8"),
+    }
 }

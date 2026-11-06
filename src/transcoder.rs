@@ -33,7 +33,7 @@ use crate::error::ForgeError;
 /// Encodings the tool can write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetEncoding {
-    /// UTF-8 without BOM (default; Playbook Strategy A).
+    /// UTF-8 without BOM (the default target).
     Utf8,
     /// UTF-8 with `EF BB BF` prepended.
     Utf8Bom,
@@ -73,13 +73,6 @@ impl TargetEncoding {
 impl fmt::Display for TargetEncoding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.tag())
-    }
-}
-
-impl Default for TargetEncoding {
-    /// `utf-8` — required by `#[derive(Default)]` on the CLI arg structs.
-    fn default() -> Self {
-        TargetEncoding::Utf8
     }
 }
 
@@ -246,7 +239,13 @@ pub fn transcode(bytes: &[u8], target: TargetEncoding) -> Result<TranscodeOutcom
 /// Fast path: `Utf8` → `utf-8` returns [`TranscodeOutcome::Unchanged`] with
 /// zero allocation. Otherwise strict-decode, encode, and compare: a
 /// byte-identical result is reported as `Unchanged` so callers skip the write
-/// (invariants #5 and #10).
+/// and a second pass over the same tree touches no file.
+///
+/// A UTF-16LE target whose decoded text begins with `U+0000` is refused
+/// ([`ForgeError::EncodeError`]): the output would start `FF FE 00 00`, which
+/// the detector reads back as the UTF-32LE BOM, so the file could never be
+/// re-read as UTF-16 again. UTF-16BE is safe (`FE FF 00 00` re-reads as
+/// UTF-16BE).
 pub fn transcode_detected(
     bytes: &[u8],
     detected: DetectedEncoding,
@@ -256,6 +255,14 @@ pub fn transcode_detected(
         return Ok(TranscodeOutcome::Unchanged);
     }
     let text = decode_strict(bytes, detected)?;
+    if target == TargetEncoding::Utf16Le && text.starts_with('\u{0}') {
+        return Err(ForgeError::EncodeError(
+            "utf-16le output would begin with `FF FE 00 00` (indistinguishable from the \
+             utf-32le BOM) because the content begins with U+0000; the file could not be \
+             re-read as UTF-16 on the next run"
+                .into(),
+        ));
+    }
     let encoded = encode(&text, target);
     if encoded == bytes {
         Ok(TranscodeOutcome::Unchanged)
