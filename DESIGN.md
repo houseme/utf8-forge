@@ -277,6 +277,14 @@ const DEFAULT_EXCLUDE_PREFIXES: &[&str] = &[
   size can therefore be a lower bound on its final size.
 - Hidden files (`.`-prefixed) skipped unless `--include-hidden`.
 
+Glob matching uses iterative latest-wildcard retries at both the character
+and path-component levels. Component matching takes at most
+O(pattern characters × filename characters) work. Path matching takes at most
+O(pattern components × path components) component comparisons. The matcher
+fully evaluates valid exclusions, including those that previously exhausted
+the recursive step budget. `?` consumes one Unicode scalar value, `*` stays
+within a component and `**` spans zero or more components.
+
 ### 5.4 Ignore Files
 
 Gitignore-style exclusions via `--ignore-file <PATH>` (fatal exit 2 when the
@@ -424,13 +432,13 @@ utf8-forge convert --url <URL> --output <PATH> [--target utf-8] [--report out.js
 | `Content-Length` pre-check  | When present    | Oversized responses rejected before the body is read                               |
 | Streaming (current)         | Always          | 8 KiB `Read` loop into a unique temp file; cap enforced per chunk                   |
 
-Current implementation: **streaming to a temp file with per-chunk cap
-enforcement** (`--max-file-size`, default 200 MiB). At most `max_size` bytes
-are ever held in memory (the final read-back). An oversized payload aborts
-mid-download — the same `TooLarge` error as before, the temp file is deleted,
-and nothing is buffered beyond the cap. Payloads ≤ the cap behave
-byte-identically to the previous full-buffer implementation. No `fsync` on the
-temp file; the temp name shares `writer::unique_suffix`.
+The download streams into an exclusively created read/write temporary file
+with per-chunk cap enforcement (`--max-file-size`, default 200 MiB). The chunk
+buffer holds 8 KiB. Final read-back rewinds the same handle and reads up to the
+received byte count, bounded by the configured cap. The handle is closed
+before cleanup on success, oversize rejection and I/O errors. A creation
+collision preserves the existing path. Temporary names use
+`writer::unique_suffix`.
 
 ### 8.4 HTTPS & Redirects
 
@@ -461,27 +469,9 @@ fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
     if let Some(len) = resp.content_length() && len > max_size {
         return Err(ForgeError::TooLarge { size: len, max: max_size });
     }
-    // Stream into a unique temp file, enforcing the cap per chunk: an
-    // oversized payload is aborted mid-download and the temp file deleted;
-    // nothing beyond the cap is ever buffered.
+    // The helper owns exclusive creation, streaming, rewind and cleanup.
     let tmp = std::env::temp_dir().join(format!(".utf8-forge-fetch-{}", unique_suffix()));
-    let cleanup = |p: &Path| { let _ = fs::remove_file(p); };
-    let mut file = fs::File::create(&tmp)?;
-    let (mut total, mut buf) = (0u64, [0u8; 8192]);
-    loop {
-        match resp.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n as u64;
-                if total > max_size { cleanup(&tmp); return Err(ForgeError::TooLarge { size: total, max: max_size }); }
-                file.write_all(&buf[..n])?;
-            }
-            Err(e) => { cleanup(&tmp); return Err(ForgeError::Fetch(format!("read body failed: {e}"))); }
-        }
-    }
-    let body = fs::read(&tmp)?; // the only moment the payload is fully in memory
-    cleanup(&tmp);
-    Ok(body)
+    read_body_to_temp(&mut resp, max_size, &tmp)
 }
 
 fn derive_output_path(url: &str) -> PathBuf {

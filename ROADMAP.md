@@ -29,7 +29,7 @@
 | R1.3 | [x] P1 | **Read-only files silently overwritten.** POSIX rename defeats `chmod 444`; convert rewrote write-protected files with exit 0. Now a pre-write check: read-only file → `io_error` record ("file is write-protected"), skipped, original intact. | T1 | chmod 444 file → exit 1, content+mode unchanged, `error_files` contains it |
 | R1.4 | [x] P1 | **Verbose lines hard-code `utf-8` as target.** `--target gb18030 -v` printed `utf-8 → utf-8`. Now prints the real target tag. | C3 | `convert --target utf-16le -v` shows `... → utf-16le` |
 | R1.5 | [x] P1 | **Fetch mode rewrote byte-identical output and labeled it `converted`.** Now: if the destination exists with identical bytes → action `unchanged`, no write (dry-run reports the same). Missing/differing destination still writes as `converted`. | T2 | Second fetch of the same URL+output → `unchanged`, mtime preserved |
-| R1.6 | [x] P1 | **Glob matcher hangs on star-heavy patterns.** Exponential backtracking (`************zzzzzzz` ran > 300 s). Fix: consecutive-star collapse at compile time (`**`/`***…` → `**`, `a**b` → `a*b`) + a step budget in the matchers (budget exhausted → no match). | C4 | Pathological pattern finishes instantly; existing glob semantics tests still pass |
+| R1.6 | [x] P1 | **Glob matcher hangs on star-heavy patterns.** Exponential backtracking (`************zzzzzzz` ran > 300 s). Fix: consecutive-star collapse at compile time (`**`/`***…` → `**`, `a**b` → `a*b`) + a step budget in the matchers (budget exhausted → no match). | C4 | Pathological pattern finishes instantly; exact matching replaces the budget fallback in R7.3 |
 | R1.7 | [x] P1 | **Report-write failure exits 2 *after* the tree was converted.** Now `--report` is pre-flighted (parent dirs created + writability probed via create/remove temp file) before any file is touched. | T5 + V9 (round 2) | Unwritable report dir (missing *or* existing read-only) → exit 2 with tree untouched |
 | R1.8 | [x] P1 | **`--report` inside the tree pollutes later runs** (`.json` is whitelisted). Now the canonicalized report path is excluded from traversal in all modes. | C9 | `scan --report tree/scan.json` twice → identical counts |
 | R1.9 | [x] P2 | **Double-BOM UTF-16 silently drops the content U+FEFF.** `encoding_rs` BOM-sniffs again after the manual strip. Now uses `decode_without_bom_handling`, so only the real BOM is stripped. | C5 | `FF FE FF FE 68 00 69 00` round-trips byte-identically to `utf-16le` |
@@ -52,7 +52,7 @@
 | R1.26 | [x] P2 | **Scan summary buckets do not sum to candidates when a file errors** — add an `errors` counter to `ScanSummary` (buckets + errors + too_large == candidates) and document. | C26 (round 3) | chmod 000 file → `summary.errors == 1`, sums reconcile |
 | R1.27 | [x] P2 | **`write_report` is truncate-then-write**, diverging from the crate's crash-safety doctrine. Reuse `writer::atomic_write`. | C27 (round 3) | report writes go through temp+rename |
 | R1.28 | [x] P1 | **UTF-32BE BOM bytes inverted** (`FE FF 00 00` checked; the real UTF-32BE BOM is `00 00 FE FF`, WHATWG — a payload starting `FE FF 00 00` is UTF-16BE + leading NUL). Detector now follows WHATWG order; docs corrected. | W1 (final verification) | real UTF-32BE file → `utf-32be`, converted correctly; `FE FF 00 41 …` → `utf-16be` |
-| R1.29 | [x] P2 | **Fix-mode report options showed defaults** (`cmd_fix` passed `None` to `options_block`). Now reports the real target/dry-run/backup-dir. | W2 (final verification) | `fix --target utf-16le --dry-run` → report `options.target = "utf-16le"`, `dry_run = true` |
+| R1.29 | [x] P2 | **Fix-mode report options showed defaults** (`cmd_fix` passed `None` to `options_block`). Now reports the real target/dry-run/backup-dir. | W2 (final verification) | `fix --target utf-8 --dry-run` → report `options.target = "utf-8"`, `dry_run = true`; R6.4 rejects other targets |
 
 ## R2 — Documentation alignment (v0.1.x, this cycle)
 
@@ -93,7 +93,7 @@
 | R3.4 | `[-]` `report`-write failure after conversion → treat as success | Exit 2 stays: an audit run without its report is not a completed run. R1.7 pre-flight removes the practical harm. |
 | R3.5 | `[-]` Streaming remote download | Source files are small; `bytes()` + cap is sufficient (DESIGN §8.3 defers streaming). Revisit if >200 MiB fetches become real. — Superseded by R5.4 (streaming fetch implemented this cycle) at user request. |
 
-## R4 — Future (not scheduled)
+## R4 — Deferred scope
 
 - `[-]` **Bazel/MSBuild project-graph-aware scoping** — rejected for now
   (2026-11-06): no demand signal, large surface (project-file parsers), and
@@ -109,11 +109,11 @@ tests per feature). Implementation status tracked here.
 | # | Priority | Item | Key decisions (spec v1) | Acceptance |
 |---|----------|------|-------------------------|------------|
 | R5.1 | [x] P1 | **Ignore file**: `--ignore-file <PATH>`, auto-discovery of `<root>/.utf8forgeignore`, `--no-ignore-file`. Gitignore-subset syntax: `#` comments, trailing `/` dir-only, leading `/` anchored, no-slash patterns match basename at any depth, `!` negation last-match-wins, no escapes. Independent exclusion layer (AND with existing gates). | Explicit missing file → fatal exit 2; auto missing → silent; auto unreadable → warning; case-insensitive; `Glob::compile_raw` (backslash is literal); ignore path added to walker skip set | Spec §1.8 tests 1–10 |
-| R5.2 | [x] P1 | **Config file**: `--config <PATH>` TOML, precedence CLI > config > defaults; keys `[filter] extensions/exclude_dirs/exclude_ext/exclude_globs/include_*/include_hidden`, `[convert] target/backup_dir`, `[options] max_file_size/threads`; strict unknown keys → exit 2; lists replace across layers; conflicts checked post-merge; fetch mode ignores `--config`. | `--target`/`--max-file-size` become Option to detect "flag passed"; missing/malformed → exit 2 with TOML line/col; `toml 1.2` (parse+serde) dep — spec v1 said 0.9, bumped to 1.2 during implementation | Spec §2.7 tests 1–10 |
+| R5.2 | [x] P1 | **Config file**: `--config <PATH>` TOML, precedence CLI > config > defaults; keys `[filter] extensions/exclude_dirs/exclude_ext/exclude_globs/include_*/include_hidden`, `[convert] target/backup_dir`, `[options] max_file_size/threads`; strict unknown keys → exit 2; lists replace across layers; conflicts checked post-merge. Fetch mode rejects `--config` following R6.5. | `--target`/`--max-file-size` become Option to detect "flag passed"; missing/malformed → exit 2 with TOML line/col; `toml 1.2` (parse+serde) dep — spec v1 said 0.9, bumped to 1.2 during implementation | Spec §2.7 tests 1–10 |
 | R5.3 | [x] P1 | **UTF-32 read support**: `Utf32Le`/`Utf32Be` detection (4-byte BOM checked before UTF-16; WHATWG-style precedence), strict decode (misaligned tail / surrogate / >0x10FFFF → decode_error), no UTF-32 encode target, verify fails utf-32 files, scan summary gains `utf32le`/`utf32be`. | Supersedes R1.10's `Unknown` verdict (that was the interim guard while UTF-32 was a non-goal) | Spec §3.8 tests 1–10 |
 | R5.4 | [x] P2 | **Streaming fetch**: chunk loop to a unique temp file, per-chunk cap enforcement (mid-download abort, temp cleaned), final read-back; behavior byte-identical for payloads ≤ cap; memory bounded by cap. | No fsync on temp; `unique_suffix` shared with writer | Spec §4.5 tests 1–8 |
 | R5.5 | [x] P1 | **`fix` subcommand**: one traversal, convert pass then verify pass on the same file list; report mode "fix", flat `FixSummary` (convert counters + `passed`/`failed`), `verify_failed_files` list (skip-if-empty); exit 3 gate-wins, else 1 convert issues, else 0; dry-run keeps verify live. | `--url`/`--output` structurally absent (clap exit 2); too-large → verify `failed` → exit 3 | Spec §5.7 tests 1–10 |
-| R5.6 | [x] P2 | **`diff` subcommand**: `diff --before A.json --after B.json [--report P] [--fail-on-change]`; per-path added/removed/changed (action or byte-count drift); roots-differ → warning; malformed input → exit 2; default exit 0, `--fail-on-change` → 1 on drift. | Exact path-string compare (same-root requirement documented); duplicate paths last-wins; new `DiffReport` document type | Spec §6.8 tests 1–10 |
+| R5.6 | [x] P2 | **`diff` subcommand**: `diff --before A.json --after B.json [--report P] [--fail-on-change]`; per-path added/removed/changed (action or byte-count drift); roots-differ → warning; malformed input → exit 2; default exit 0, `--fail-on-change` → 1 on drift. | Root-relative path comparison following R6.3; duplicate paths last-wins; new `DiffReport` document type | Spec §6.8 tests 1–10 |
 
 ## R6 — Review-fix wave (v0.2.1, four-expert adversarial review of v0.2.0)
 
@@ -141,7 +141,31 @@ all fixed and re-verified.
 
 ---
 
-*ROADMAP v0.3 — R1/R2 (v0.1.0), R5 (v0.2.0), and R6 (v0.2.1) shipped; the R6
-wave came from the v0.2.0 four-expert review (code `A*`, docs `B*`, adversarial
-QA `Q*`, hygiene `D*`). R3 records deliberate rejections; R4's sole item is
-rejected pending real demand.*
+## R7 — Reliability and filtering follow-up (unreleased, 2026-11-07)
+
+The source review against `a2a6231` found that R6.7's single-load config
+acceptance still needed implementation. Commit `74356a4` completes that part
+alongside bounded reads, verify diagnostics and atomic-write improvements.
+The remaining work below follows the existing filtering, streaming-fetch and
+cross-platform validation contracts. R4's project-graph integration remains
+deferred pending a concrete repository requirement.
+
+| # | Priority | Item | Acceptance and verification |
+|---|----------|------|-----------------------------|
+| R7.1 | [x] P1 | **Bounded reads and shared config snapshot.** Local input and fetch-output comparisons read at most the cap plus one byte. Convert/fix reuse the parsed config. Verify prints auto-ignore warnings. | Exact-cap, zero-cap, growing-input read, config precedence, warning/quiet and matching-prefix fetch tests pass. Implemented in `74356a4`. |
+| R7.2 | [x] P1 | **Atomic-write reliability.** Short exclusive temp names support long basenames. A process-local counter separates concurrent names. Permissions are copied before sync, failures abort replacement, and bare destinations use the current directory for parent sync. | Long-name conversion with backups, permission retention, failed-rename cleanup and concurrent complete writes pass. Implemented in `74356a4`. |
+| R7.3 | [x] P1 | **Exact glob matching with bounded complexity.** Replace recursive backtracking and the false-negative step-budget fallback with iterative matching. | Adversarial valid exclusions still match, Unicode `?` and component `**` semantics hold, and exhaustive small-input reference comparisons pass. |
+| R7.4 | [x] P1 | **Fetch temp-file ownership and cleanup.** Exclusively create the stream file, rewind the original handle for read-back and close it before cleanup. | Success, oversize and injected read failures clean up owned temps. Existing files and symlinks at a colliding path retain their contents. |
+| R7.5 | [x] P1 | **Complete CI matrix.** Run Linux/macOS/Windows against default/all/local-only features and map Cargo arguments explicitly. | Nine unique build/test combinations, default-target smoke enabled, workflow lint and exact exit-status smoke checks pass. |
+
+Integrated local verification used stable Rust on macOS with 173 all-feature
+tests and 147 local-only tests passing. Both feature configurations pass
+Clippy with warnings denied. Formatting, rustdoc with warnings denied,
+`actionlint` and the extracted CI smoke script pass. Glob tests compare
+178,425 generated cases against an independent exhaustive matcher. Matrix
+expansion checks confirm all nine platform/feature combinations.
+
+---
+
+*ROADMAP v0.4 — R1/R2, R5 and R6 record previous delivery waves. R7 tracks the
+current source-backed follow-up. R3 and R4 retain scope decisions.*
