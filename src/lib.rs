@@ -17,8 +17,8 @@
 //!
 //! Exit codes:
 //! - `0` success
-//! - `1` non-fatal per-file issues (`unknown`, `decode_error`, `io_error`,
-//!   `fetch_error`)
+//! - `1` non-fatal per-file issues (`unknown`, `decode_error`, `encode_error`,
+//!   `io_error`, `fetch_error`)
 //! - `2` fatal (bad args, missing root, I/O setup failure) — also emitted by
 //!   clap on parse errors
 //! - `3` `verify`/`fix` gate failure (non-UTF-8 whitelisted files; fix's
@@ -241,7 +241,9 @@ pub fn convert_file(path: &Path, ctx: &ConvertCtx) -> FileRecord {
 }
 
 /// Verify a file is UTF-8 without BOM. Unreadable / oversized files fail
-/// closed (a gate must not wave through what it cannot inspect).
+/// closed (a gate must not wave through what it cannot inspect). The size is
+/// re-checked after the read, mirroring the other processors, so a file that
+/// grows between stat and read cannot slip past the cap.
 pub fn verify_file(path: &Path, max_file_size: u64) -> FileRecord {
     let b = RecBuilder::new(path);
     let size = fs::metadata(path).map(|m| m.len()).ok();
@@ -261,6 +263,15 @@ pub fn verify_file(path: &Path, max_file_size: u64) -> FileRecord {
         Err(e) => return b.done(None, "failed", size, None, Some(format!("io_error: {e}"))),
     };
     let sz = bytes.len() as u64;
+    if sz > max_file_size {
+        return b.done(
+            None,
+            "failed",
+            Some(sz),
+            None,
+            Some("too_large: exceeds --max-file-size".to_string()),
+        );
+    }
     let det = detect(&bytes);
     let tag = det.tag();
     if det == DetectedEncoding::Utf8 {
@@ -349,6 +360,8 @@ fn finalize_report(
                         let msg = r.error.as_deref().unwrap_or("");
                         if msg.starts_with("decode_error") {
                             s.decode_errors += 1;
+                        } else if msg.starts_with("encode_error") {
+                            s.encode_errors += 1;
                         } else {
                             s.io_errors += 1;
                         }
@@ -374,6 +387,8 @@ fn finalize_report(
                         let msg = r.error.as_deref().unwrap_or("");
                         if msg.starts_with("decode_error") {
                             s.decode_errors += 1;
+                        } else if msg.starts_with("encode_error") {
+                            s.encode_errors += 1;
                         } else if msg.starts_with("fetch_error") {
                             s.fetch_error += 1;
                         } else {
@@ -463,6 +478,12 @@ fn print_records(records: &[FileRecord], console: ConsoleCfg, target_tag: Option
                 r.error.as_deref().unwrap_or("unspecified")
             )),
             "skipped_unknown" => print_problem(format!("unknown {}", r.path)),
+            // Scan records unknown files as `detected` with the `unknown` tag;
+            // they are still per-file issues (scan exits 1) and get the same
+            // stderr line as `skipped_unknown` in the other modes.
+            "detected" if r.detected == Some("unknown") => {
+                print_problem(format!("unknown {}", r.path))
+            }
             "failed" => {
                 let reason = r
                     .error
@@ -473,7 +494,9 @@ fn print_records(records: &[FileRecord], console: ConsoleCfg, target_tag: Option
             _ => {}
         }
         match r.action {
-            "detected" => {
+            // Unknown files already got their stderr problem line; the
+            // verbose classification line would repeat it verbatim under -v.
+            "detected" if r.detected != Some("unknown") => {
                 print_verbose(console, format!("{} {}", r.detected.unwrap_or("?"), r.path))
             }
             "unchanged" => print_verbose(
@@ -533,7 +556,7 @@ fn print_convert_summary(
             "[utf8-forge] scanned={}  candidates={}",
             s.total_files, s.candidates
         );
-        let errors = s.decode_errors + s.io_errors;
+        let errors = s.decode_errors + s.encode_errors + s.io_errors;
         println!(
             "[utf8-forge] already_utf8={}  converted={}  unknown={}  errors={}",
             s.already_utf8, s.converted, s.unknown, errors
@@ -623,6 +646,10 @@ fn merge_tree_config(common: &mut TreeArgs) -> anyhow::Result<Option<String>> {
     if common.threads.is_none() {
         common.threads = cfg.options.threads;
     }
+    // Validate `[convert].target` even in modes that ignore the section, so
+    // an invalid value is always a loud, key-naming error instead of being
+    // silently dropped by scan/verify.
+    cfg.target()?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -693,22 +720,16 @@ impl ConvertOptions for FixArgs {
     }
 }
 
-impl FixArgs {
-    /// The target encoding after config merge (built-in default: utf-8).
-    pub fn target_or_default(&self) -> crate::transcoder::TargetEncoding {
-        self.target
-            .unwrap_or(crate::transcoder::TargetEncoding::Utf8)
-    }
-}
-
 /// Apply the tree merge plus the `[convert]` section (convert / fix).
-/// CLI flags win over config values; runs before any pre-flight.
+/// CLI flags win over config values; runs before any pre-flight. The parsed
+/// config is returned so callers can consult sections without re-reading the
+/// file.
 fn merge_convert_config<C: ConvertOptions + ConvertPeek>(
     conv: &mut C,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<(Option<String>, crate::config::ForgeConfig)> {
     let recorded = merge_tree_config(conv.common_mut())?;
     let Some(path) = conv.common_mut().config.clone() else {
-        return Ok(recorded);
+        return Ok((recorded, crate::config::ForgeConfig::default()));
     };
     let cfg = crate::config::load(&path)?;
     if conv.target_is_none()
@@ -721,7 +742,7 @@ fn merge_convert_config<C: ConvertOptions + ConvertPeek>(
     {
         conv.set_backup_dir(Some(std::path::PathBuf::from(dir)));
     }
-    Ok(recorded)
+    Ok((recorded, cfg))
 }
 
 // The peek helpers are dispatched through the same trait to avoid leaking
@@ -1056,15 +1077,18 @@ fn cmd_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
 /// per-file issue (`unknown` / decode / io) remains.
 fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_convert_config(&mut args)?;
+    let (config_file, _cfg) = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
     ensure_root(&common.root)?;
     let filter = build_filter(common)?;
-    ensure_backup_dir(&args)?;
+    // The report pre-flight is side-effect-free, so it runs before the backup
+    // directory is created — a rejected report path must not leave a fresh
+    // backup dir behind.
     if let Some(path) = &common.report {
         ensure_report_dir(path)?;
     }
+    ensure_backup_dir(&args)?;
     let console = console_cfg(common);
     let dry_tag = if args.dry_run { " dry_run=true" } else { "" };
     print_header(
@@ -1136,7 +1160,11 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     }
     print_convert_summary(&summary, common.report.as_deref(), elapsed, console);
     Ok(
-        if summary.unknown > 0 || summary.decode_errors > 0 || summary.io_errors > 0 {
+        if summary.unknown > 0
+            || summary.decode_errors > 0
+            || summary.encode_errors > 0
+            || summary.io_errors > 0
+        {
             1
         } else {
             0
@@ -1232,6 +1260,17 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
     if args.backup_dir.is_some() {
         bail!("--backup-dir is not supported with --url");
     }
+    // Fetch reads no config file: the only mergeable key ([convert].target)
+    // would silently change nothing here, so combining them is refused.
+    if common.config.is_some() {
+        bail!("--config is not supported with --url");
+    }
+    // Same report pre-flight as the tree modes: an unwritable report aborts
+    // before the download, so no output is produced for a run that cannot be
+    // audited.
+    if let Some(path) = &common.report {
+        ensure_report_dir(path)?;
+    }
     let console = console_cfg(common);
     print_header(
         console,
@@ -1244,8 +1283,6 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
         .clone()
         .unwrap_or_else(|| fetcher::derive_output_path(url));
 
-    // `--config` is ignored in fetch mode: fetch has no filter/backup surface,
-    // and the only mergeable key (target) is always explicit here.
     let record = match fetcher::fetch_bytes(url, common.effective_max_file_size()) {
         Err(e) => {
             // An oversized payload is the documented `too_large` bucket; any
@@ -1275,7 +1312,9 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
             let tag = det.tag();
             match transcode_detected(&bytes, det, args.target_or_default()) {
                 Err(e) => {
-                    print_problem(format!("error {url} ({}: {e})", e.category()));
+                    // Printed exactly once, by `print_records`, against the
+                    // output path — the same single-line contract as the
+                    // generic fetch-error branch.
                     RecBuilder::new(&out_path).done(
                         Some(tag),
                         "error",
@@ -1379,6 +1418,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
     Ok(
         if summary.unknown > 0
             || summary.decode_errors > 0
+            || summary.encode_errors > 0
             || summary.io_errors > 0
             || summary.fetch_error > 0
             || summary.too_large > 0
@@ -1403,15 +1443,27 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
 /// runs read-only, so the preview reports the tree's current end state.
 fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_convert_config(&mut args)?;
+    let (config_file, _cfg) = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
+    // The verify gate asserts UTF-8 without BOM no matter what the convert
+    // pass targeted, so any other target would guarantee exit 3 while having
+    // rewritten the tree into a state the gate itself rejects. Refuse it up
+    // front, covering both the CLI flag and the config file.
+    if target != TargetEncoding::Utf8 {
+        bail!(
+            "fix requires --target utf-8 (the verify gate asserts UTF-8 without BOM); got `{}`",
+            target
+        );
+    }
     ensure_root(&common.root)?;
     let filter = build_filter(common)?;
-    ensure_backup_dir(&args)?;
+    // Same ordering as convert: probe the report path before creating the
+    // backup directory, so a rejected report leaves nothing behind.
     if let Some(path) = &common.report {
         ensure_report_dir(path)?;
     }
+    ensure_backup_dir(&args)?;
     let console = console_cfg(common);
     let dry_tag = if args.dry_run { " dry_run=true" } else { "" };
     print_header(
@@ -1507,7 +1559,7 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
         f.failed = verify_failed_count;
     }
     let convert_issues = match &report.summary {
-        Summary::Fix(f) => f.unknown + f.decode_errors + f.io_errors,
+        Summary::Fix(f) => f.unknown + f.decode_errors + f.encode_errors + f.io_errors,
         _ => 0,
     };
     if let Some(path) = &common.report {
@@ -1525,7 +1577,7 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
             f.already_utf8,
             f.converted,
             f.unknown,
-            f.decode_errors + f.io_errors
+            f.decode_errors + f.encode_errors + f.io_errors
         );
         if f.too_large > 0 {
             println!("[utf8-forge] too_large={}", f.too_large);
@@ -1558,27 +1610,41 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
         serde_json::from_str(&text)
             .with_context(|| format!("cannot load {flag} report `{}`", p.display()))
     };
-    let before = load(&args.before, "--before")?;
-    let after = load(&args.after, "--after")?;
-    if let (Some(r1), Some(r2)) = (&before.root, &after.root)
+    let before_raw = load(&args.before, "--before")?;
+    let after_raw = load(&args.after, "--after")?;
+    if let (Some(r1), Some(r2)) = (&before_raw.root, &after_raw.root)
         && r1 != r2
     {
         print_problem(format!(
-            "warning: roots differ (`{r1}` vs `{r2}`); path comparison assumes identical roots"
+            "warning: roots differ (`{r1}` vs `{r2}`); paths are compared relative to each root"
         ));
     }
 
+    // Records are compared relative to each report's own root, so the same
+    // tree scanned under two root directories diffs clean.
+    let before = DiffInput {
+        mode: before_raw.mode.clone(),
+        root: before_raw.root.clone(),
+        files: differ::relativize_files(before_raw.files, before_raw.root.as_deref()),
+    };
+    let after = DiffInput {
+        mode: after_raw.mode.clone(),
+        root: after_raw.root.clone(),
+        files: differ::relativize_files(after_raw.files, after_raw.root.as_deref()),
+    };
     let mut doc = differ::compare(&before, &after);
     doc.before = args.before.to_string_lossy().into_owned();
     doc.after = args.after.to_string_lossy().into_owned();
     let summary = &doc.summary;
 
+    // The summary line goes to stderr; stdout carries only the JSON document
+    // (when no --report), so piping the diff into other tools stays clean.
     if let Some(path) = &args.report {
         ensure_report_dir(path)?;
         let json = serde_json::to_string_pretty(&doc).context("diff serialization failed")?;
         writer::atomic_write(path, (json + "\n").as_bytes())
             .with_context(|| format!("cannot write diff report {}", path.display()))?;
-        println!(
+        eprintln!(
             "[utf8-forge] diff: added={}  removed={}  changed={}  unchanged={}  report={}",
             summary.added,
             summary.removed,
@@ -1587,7 +1653,7 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
             path.display()
         );
     } else {
-        println!(
+        eprintln!(
             "[utf8-forge] diff: added={}  removed={}  changed={}  unchanged={}",
             summary.added, summary.removed, summary.action_changed, summary.unchanged
         );

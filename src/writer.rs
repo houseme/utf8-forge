@@ -60,6 +60,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ForgeError> {
             let _ = fs::set_permissions(&tmp, meta.permissions());
         }
         fs::rename(&tmp, path)?;
+        // Best-effort directory fsync: without it a machine crash right after
+        // the rename can lose the rename itself. Ignored where the platform
+        // cannot open a directory as a file (e.g. Windows).
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     })();
 

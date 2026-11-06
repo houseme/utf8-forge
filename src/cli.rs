@@ -30,6 +30,10 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::transcoder::TargetEncoding;
 
+/// Built-in per-file size cap (200 MiB) used when neither the CLI nor the
+/// config file supplies `--max-file-size`.
+pub(crate) const DEFAULT_MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
+
 /// utf8-forge — a focused, idempotent, bidirectional charset transcoder.
 #[derive(Debug, Parser)]
 #[command(
@@ -115,7 +119,8 @@ pub struct TreeArgs {
     #[arg(long = "no-ignore-file")]
     pub no_ignore_file: bool,
 
-    /// Rayon worker thread count (default: CPU count).
+    /// Rayon worker thread count (default: CPU count; values below 1 are
+    /// treated as 1).
     #[arg(long = "threads")]
     pub threads: Option<usize>,
 
@@ -145,7 +150,7 @@ impl Default for TreeArgs {
             include_rc: false,
             include_msbuild: false,
             include_hidden: false,
-            max_file_size: Some(209_715_200),
+            max_file_size: Some(DEFAULT_MAX_FILE_SIZE),
             config: None,
             ignore_file: None,
             no_ignore_file: false,
@@ -183,7 +188,7 @@ pub struct ConvertArgs {
     pub url: Option<String>,
 
     /// Destination path for --url (derived from the URL when omitted).
-    #[arg(long = "output")]
+    #[arg(long = "output", requires = "url")]
     pub output: Option<PathBuf>,
 }
 
@@ -204,7 +209,7 @@ impl Default for ConvertArgs {
 impl TreeArgs {
     /// The size cap after config merge (built-in default: 200 MiB).
     pub fn effective_max_file_size(&self) -> u64 {
-        self.max_file_size.unwrap_or(209_715_200)
+        self.max_file_size.unwrap_or(DEFAULT_MAX_FILE_SIZE)
     }
 }
 
@@ -246,6 +251,13 @@ impl Default for FixArgs {
             dry_run: false,
             backup_dir: None,
         }
+    }
+}
+
+impl FixArgs {
+    /// The target encoding after config merge (built-in default: utf-8).
+    pub fn target_or_default(&self) -> TargetEncoding {
+        self.target.unwrap_or(TargetEncoding::Utf8)
     }
 }
 

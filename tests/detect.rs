@@ -79,6 +79,8 @@ fn tags_are_stable() {
     assert_eq!(DetectedEncoding::Utf8Bom.tag(), "utf-8-bom");
     assert_eq!(DetectedEncoding::Utf16Le.tag(), "utf-16le");
     assert_eq!(DetectedEncoding::Utf16Be.tag(), "utf-16be");
+    assert_eq!(DetectedEncoding::Utf32Le.tag(), "utf-32le");
+    assert_eq!(DetectedEncoding::Utf32Be.tag(), "utf-32be");
     assert_eq!(DetectedEncoding::Gb18030.tag(), "gb18030");
     assert_eq!(DetectedEncoding::Unknown.tag(), "unknown");
 }
@@ -91,6 +93,8 @@ fn bom_flag_tracks_bom_based_detections() {
     assert!(DetectedEncoding::Utf8Bom.has_bom());
     assert!(DetectedEncoding::Utf16Le.has_bom());
     assert!(DetectedEncoding::Utf16Be.has_bom());
+    assert!(DetectedEncoding::Utf32Le.has_bom());
+    assert!(DetectedEncoding::Utf32Be.has_bom());
 }
 
 #[test]

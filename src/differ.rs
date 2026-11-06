@@ -14,13 +14,14 @@
 
 //! Report-to-report comparison for the `diff` subcommand.
 //!
-//! Reads any utf8-forge JSON report that carries a `files[]` array and
-//! compares per path: `added`, `removed`, and `changed` (action or byte-count
-//! drift). Paths are compared as exact strings — both reports must come from
-//! the same `--root` and the same platform's path spelling; a differing
-//! `root` field triggers a warning, not an error. Input reports are data, not
-//! configuration, so unknown JSON fields are ignored (lenient
-//! deserialization).
+//! Reads utf8-forge JSON reports that carry a `files[]` array and compares
+//! per path: `added`, `removed`, and `changed` (action or byte-count drift).
+//! A report without a `files` array is not a report and fails to parse, so a
+//! mistyped input path can never masquerade as an empty baseline. Paths are
+//! compared relative to each report's `root` (the root prefix is stripped,
+//! separators normalized to `/`), so the same tree scanned under two
+//! different roots diffs clean; a differing `root` field triggers a warning,
+//! not an error. Unknown JSON fields are ignored (lenient deserialization).
 
 use std::collections::HashMap;
 
@@ -38,14 +39,14 @@ pub struct DiffInputFile {
     pub bytes_after: Option<u64>,
 }
 
-/// Lenient view of a whole report.
+/// Lenient view of a whole report. `files` is required: any JSON object
+/// without it (or a bare JSON array) is rejected as not-a-report.
 #[derive(Debug, Deserialize)]
 pub struct DiffInput {
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
     pub root: Option<String>,
-    #[serde(default)]
     pub files: Vec<DiffInputFile>,
 }
 
@@ -76,6 +77,10 @@ pub struct DiffReport {
     pub before: String,
     pub after: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_mode: Option<String>,
@@ -83,6 +88,36 @@ pub struct DiffReport {
     pub added: Vec<DiffInputFile>,
     pub removed: Vec<DiffInputFile>,
     pub changed: Vec<ChangedEntry>,
+}
+
+/// Rewrite each record path relative to the report's `root`: separators are
+/// normalized to `/` and the root prefix (always with its trailing separator)
+/// is stripped. Records whose path does not start with the root are kept
+/// verbatim. Paths in the diff output are therefore root-relative and stable
+/// across root spellings, which is what makes two scans of the same tree
+/// under different roots comparable.
+pub fn relativize_files(files: Vec<DiffInputFile>, root: Option<&str>) -> Vec<DiffInputFile> {
+    let Some(root) = root else {
+        return files;
+    };
+    let root_norm = root.replace('\\', "/");
+    let prefix = if root_norm == "." {
+        "./".to_string()
+    } else if root_norm.ends_with('/') {
+        root_norm
+    } else {
+        format!("{root_norm}/")
+    };
+    files
+        .into_iter()
+        .map(|mut f| {
+            f.path = f.path.replace('\\', "/");
+            if let Some(stripped) = f.path.strip_prefix(&prefix) {
+                f.path = stripped.to_string();
+            }
+            f
+        })
+        .collect()
 }
 
 /// Compare two parsed reports. Duplicate paths within one report resolve to
@@ -141,6 +176,8 @@ pub fn compare(before: &DiffInput, after: &DiffInput) -> DiffReport {
         mode: "diff",
         before: String::new(),
         after: String::new(),
+        before_root: before.root.clone(),
+        after_root: after.root.clone(),
         before_mode: before.mode.clone(),
         after_mode: after.mode.clone(),
         summary,
@@ -236,5 +273,48 @@ mod tests {
         let input: DiffInput = serde_json::from_str(raw).unwrap();
         assert_eq!(input.files[0].path, "a.cpp");
         assert!(input.files[0].action.is_none());
+    }
+
+    #[test]
+    fn json_without_files_array_is_rejected() {
+        // Anything that is not a utf8-forge report must fail loudly instead
+        // of behaving like an empty baseline.
+        assert!(serde_json::from_str::<DiffInput>(r#"{"schema": "wrong"}"#).is_err());
+        assert!(serde_json::from_str::<DiffInput>("[]").is_err());
+        assert!(serde_json::from_str::<DiffInput>(r#"{"files": "nope"}"#).is_err());
+    }
+
+    #[test]
+    fn root_prefix_is_stripped_from_record_paths() {
+        let files: Vec<DiffInputFile> = vec![
+            file("tree/a.cpp"),
+            file("./b.h"),
+            file("outside/c.txt"),
+            file(r"tree\sub\d.rs"),
+        ];
+        let rel = relativize_files(files, Some("tree"));
+        let paths: Vec<&str> = rel.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.cpp", "./b.h", "outside/c.txt", "sub/d.rs"]);
+    }
+
+    #[test]
+    fn dot_root_strips_leading_dot_slash() {
+        let rel = relativize_files(vec![file("./a.cpp")], Some("."));
+        assert_eq!(rel[0].path, "a.cpp");
+    }
+
+    #[test]
+    fn missing_root_keeps_paths_untouched() {
+        let rel = relativize_files(vec![file("tree/a.cpp")], None);
+        assert_eq!(rel[0].path, "tree/a.cpp");
+    }
+
+    fn file(path: &str) -> DiffInputFile {
+        DiffInputFile {
+            path: path.to_string(),
+            action: Some("unchanged".into()),
+            bytes_before: Some(1),
+            bytes_after: Some(1),
+        }
     }
 }

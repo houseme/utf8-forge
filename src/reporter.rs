@@ -81,7 +81,8 @@ pub struct ScanSummary {
     pub gb18030: u64,
     pub unknown: u64,
     /// Files that could not be read (I/O errors); they carry no encoding
-    /// bucket, so `buckets + errors + too_large == candidates`.
+    /// bucket, so `buckets + errors == candidates` (equivalently
+    /// `buckets + errors + too_large == total_files`).
     pub errors: u64,
     pub too_large: u64,
 }
@@ -99,6 +100,10 @@ pub struct ConvertSummary {
     pub converted: u64,
     pub unknown: u64,
     pub decode_errors: u64,
+    /// Content that decodes cleanly but cannot be encoded into the requested
+    /// target without producing unreadable bytes (e.g. the UTF-16LE NUL
+    /// guard); tracked separately from decode and I/O failures.
+    pub encode_errors: u64,
     pub io_errors: u64,
     pub too_large: u64,
     pub fetch_error: u64,
@@ -123,6 +128,8 @@ pub struct FixSummary {
     pub converted: u64,
     pub unknown: u64,
     pub decode_errors: u64,
+    /// Same meaning as the convert summary's `encode_errors`.
+    pub encode_errors: u64,
     pub io_errors: u64,
     pub too_large: u64,
     /// Verify pass count on the same tree.

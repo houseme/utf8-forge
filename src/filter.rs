@@ -139,9 +139,14 @@ impl FilterConfig {
         }
 
         // `-e/--ext` overrides the default whitelist; opt-in flags only apply
-        // to the default set.
+        // to the default set. An explicit override that normalizes to nothing
+        // (`--ext ""`) would silently scan zero files, so it is fatal.
         let mut extensions: HashSet<String> = if !opts.ext_override.is_empty() {
-            normalize_ext_list(&opts.ext_override)?
+            let normalized = normalize_ext_list(&opts.ext_override)?;
+            if normalized.is_empty() {
+                return Err("empty --ext list: no usable extensions".to_string());
+            }
+            normalized
         } else {
             let mut base: HashSet<String> = DEFAULT_EXTENSIONS
                 .iter()

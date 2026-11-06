@@ -119,11 +119,13 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
 /// - a segment without an extension gets `.utf8` appended (`.../foo` → `foo.utf8`);
 /// - no usable segment → `download.utf8`.
 pub fn derive_output_path(url: &str) -> PathBuf {
+    // Scan backwards so a trailing slash (`.../dir/`) cannot shadow the real
+    // last segment with an empty one.
     let segment = reqwest::Url::parse(url).ok().and_then(|u| {
         u.path_segments()?
-            .next_back()
+            .rev()
+            .find(|s| !s.is_empty())
             .map(str::to_owned)
-            .filter(|s| !s.is_empty())
     });
 
     match segment {
@@ -186,6 +188,20 @@ mod tests {
         assert_eq!(
             derive_output_path("https://example.com/foo."),
             PathBuf::from("foo..utf8")
+        );
+    }
+
+    #[test]
+    fn derive_skips_trailing_slash_segments() {
+        // A trailing slash yields an empty last segment; the real last
+        // non-empty segment wins instead of falling through to the fallback.
+        assert_eq!(
+            derive_output_path("https://example.com/a/dir.txt/"),
+            PathBuf::from("dir.txt")
+        );
+        assert_eq!(
+            derive_output_path("https://example.com/a/noext/"),
+            PathBuf::from("noext.utf8")
         );
     }
 }

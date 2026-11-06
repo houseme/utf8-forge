@@ -19,8 +19,10 @@
 use std::fs;
 use std::path::Path;
 
+use clap::Parser;
 use serde_json::Value;
-use utf8_forge::cli::{Cli, Commands, ConvertArgs, FixArgs, TreeArgs};
+use utf8_forge::cli::{Cli, Commands, ConvertArgs, DiffArgs, FixArgs, TreeArgs};
+use utf8_forge::transcoder::TargetEncoding;
 
 const GBK: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3]; // "你好" GB18030
 const UTF8: &[u8] = "你好".as_bytes();
@@ -66,7 +68,7 @@ fn read_report(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// The mixed tree from the rollout playbook.
+/// The standard mixed-encoding test tree.
 fn build_mixed_tree(root: &Path) {
     put(root, "a.cpp", GBK); // GB18030 → convert
     put(root, "b.h", b"// plain ascii\n"); // UTF-8 → unchanged
@@ -89,7 +91,7 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
     let reports = tree.path();
     build_mixed_tree(&root);
 
-    // ---------------- P0: scan ----------------
+    // ---------------- scan ----------------
     let scan_report = reports.join("scan.json");
     let code = run_tree(Commands::Scan, &args(&root, Some(&scan_report)));
     // 1 unknown file → exit 1.
@@ -118,14 +120,14 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
             && !p.contains("OutputFile1")
             && !p.contains("image.png")
     }));
-    // Invariant #8: report files sorted by path.
+    // files[] is sorted by path.
     let mut sorted = paths.clone();
     sorted.sort();
     assert_eq!(paths, sorted);
     // Scan never writes.
     assert_eq!(fs::read(root.join("a.cpp")).unwrap(), GBK);
 
-    // ---------------- P1: dry-run ----------------
+    // ---------------- dry-run ----------------
     let dry_report = reports.join("dry.json");
     let dry_args = args(&root, Some(&dry_report));
     let code = run_convert(&dry_args, |c| c.dry_run = true);
@@ -158,7 +160,7 @@ fn full_rollout_loop_scan_dry_run_convert_verify_idempotent() {
         &[0xFF, 0xFE, b'h', 0, b'i', 0]
     );
 
-    // ---------------- P1: real convert with backup ----------------
+    // ---------------- real convert with backup ----------------
     let b_h_mtime_before = fs::metadata(root.join("b.h")).unwrap().modified().unwrap();
     let backup = tree.path().join("backup");
     let apply_report = reports.join("apply.json");
@@ -507,7 +509,7 @@ fn scan_and_verify_reject_conversion_only_flags() {
 }
 
 // ---------------------------------------------------------------------------
-// R5 feature acceptance tests (config / ignore-file / fix / diff)
+// Feature-surface tests (config / ignore-file / fix / diff)
 // ---------------------------------------------------------------------------
 
 fn run_fix(a: &TreeArgs, modify: impl FnOnce(&mut FixArgs)) -> i32 {
@@ -521,7 +523,7 @@ fn run_fix(a: &TreeArgs, modify: impl FnOnce(&mut FixArgs)) -> i32 {
     })
 }
 
-/// R5.2: config file replaces the whitelist; CLI wins on conflict; unknown
+/// Config file replaces the whitelist; CLI wins on conflict; unknown
 /// keys and missing files are fatal.
 #[test]
 fn config_file_precedence_and_errors() {
@@ -533,7 +535,8 @@ fn config_file_precedence_and_errors() {
     let cfg = dir.path().join("forge.toml");
     fs::write(&cfg, "[filter]\nextensions = [\"h\"]\n").unwrap();
 
-    // 1. config replaces the whitelist.
+    // 1. Without a config both files are scanned; with the config the
+    // whitelist is replaced (only .h).
     let code = run_tree(Commands::Scan, &args(&root, None));
     assert_eq!(code, 0);
     let mut a = args(&root, None);
@@ -548,12 +551,22 @@ fn config_file_precedence_and_errors() {
     );
     let doc = read_report(&report);
     assert_eq!(doc["summary"]["total_files"], 1, "only .h scanned");
+    let scanned: Vec<&str> = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        scanned.iter().all(|p| p.ends_with("b.h")),
+        "config whitelist must select only b.h, got {scanned:?}"
+    );
     assert_eq!(
         doc["options"]["config_file"].as_str().unwrap(),
         cfg.to_string_lossy()
     );
 
-    // 2. CLI --ext wins over config.
+    // 2. CLI --ext wins over config (only a.cpp, not b.h).
     let report2 = dir.path().join("c2.json");
     a.report = Some(report2.clone());
     a.ext = vec!["cpp".into()];
@@ -563,9 +576,16 @@ fn config_file_precedence_and_errors() {
         }),
         0
     );
-    assert_eq!(read_report(&report2)["summary"]["total_files"], 1);
+    let doc2 = read_report(&report2);
+    assert_eq!(doc2["summary"]["total_files"], 1);
+    assert!(
+        doc2["files"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("a.cpp")
+    );
 
-    // 4. unknown key → exit 2.
+    // 3. unknown key → exit 2.
     let bad = dir.path().join("bad.toml");
     fs::write(&bad, "[filter]\ntypo_key = 1\n").unwrap();
     let mut a = args(&root, None);
@@ -577,7 +597,7 @@ fn config_file_precedence_and_errors() {
         2
     );
 
-    // 5. malformed TOML → exit 2.
+    // 4. malformed TOML → exit 2.
     let bad2 = dir.path().join("bad2.toml");
     fs::write(&bad2, "[filter").unwrap();
     let mut a = args(&root, None);
@@ -589,7 +609,7 @@ fn config_file_precedence_and_errors() {
         2
     );
 
-    // 6. missing file → exit 2.
+    // 5. missing file → exit 2.
     let mut a = args(&root, None);
     a.config = Some(dir.path().join("missing.toml"));
     assert_eq!(
@@ -600,7 +620,7 @@ fn config_file_precedence_and_errors() {
     );
 }
 
-/// R5.1: ignore file — explicit fatal-missing, auto-discovery, negation
+/// Ignore file — explicit fatal-missing, auto-discovery, negation
 /// last-match-wins, `--no-ignore-file`, layer independence.
 #[test]
 fn ignore_file_semantics() {
@@ -677,7 +697,7 @@ fn ignore_file_semantics() {
     );
 }
 
-/// R5.5: fix = convert + verify in one pass; gate wins the exit code.
+/// Fix = convert + verify in one pass; the gate wins the exit code.
 #[test]
 fn fix_subcommand_gate_and_summary() {
     let dir = tempfile::tempdir().unwrap();
@@ -726,7 +746,7 @@ fn fix_subcommand_gate_and_summary() {
     assert_eq!(fs::read(dirty.path().join("x.cpp")).unwrap(), GBK);
 }
 
-/// R5.6: diff compares two reports; --fail-on-change gates.
+/// Diff compares two reports; --fail-on-change gates.
 #[test]
 fn diff_subcommand_compare_and_gate() {
     let dir = tempfile::tempdir().unwrap();
@@ -752,9 +772,17 @@ fn diff_subcommand_compare_and_gate() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "default exit is 0");
+    // Stdout carries only the JSON document (piping into other tools stays
+    // clean); the summary line lives on stderr.
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("changed=1"), "{stdout}");
     assert!(stdout.contains("\"mode\": \"diff\""), "JSON on stdout");
+    assert!(
+        !stdout.contains("[utf8-forge]"),
+        "no console-prefixed lines on stdout: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("diff: added="), "{stderr}");
+    assert!(stderr.contains("changed=1"), "{stderr}");
 
     // --fail-on-change: drift → exit 1.
     let out = std::process::Command::new(bin)
@@ -798,4 +826,354 @@ fn diff_subcommand_compare_and_gate() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A UTF-16LE target refuses NUL-leading content: the output would begin
+/// `FF FE 00 00` (the UTF-32LE BOM), so the file is reported as an error and
+/// left byte-identical, and every rerun reports the same thing.
+#[test]
+fn utf16le_target_refuses_nul_leading_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "nul.txt", b"\x00B\n");
+    let original = fs::read(root.join("nul.txt")).unwrap();
+
+    let report = dir.path().join("r1.json");
+    let code = run_convert(&args(&root, Some(&report)), |a| {
+        a.target = Some(TargetEncoding::Utf16Le)
+    });
+    assert_eq!(code, 1, "encode_error is a per-file issue");
+    let doc = read_report(&report);
+    assert_eq!(doc["files"][0]["action"], "error");
+    assert!(
+        doc["files"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("encode_error")
+    );
+    assert_eq!(doc["summary"]["encode_errors"], 1);
+    assert_eq!(doc["summary"]["io_errors"], 0);
+    assert_eq!(fs::read(root.join("nul.txt")).unwrap(), original);
+
+    // Rerun is byte- and verdict-stable: no drift accumulates.
+    let report2 = dir.path().join("r2.json");
+    let code2 = run_convert(&args(&root, Some(&report2)), |a| {
+        a.target = Some(TargetEncoding::Utf16Le)
+    });
+    assert_eq!(code2, 1);
+    assert_eq!(fs::read(root.join("nul.txt")).unwrap(), original);
+    assert_eq!(
+        read_report(&report2)["files"][0]["action"],
+        "error",
+        "the refusal must be idempotent, not a one-time effect"
+    );
+}
+
+/// Fix accepts only the default target: any other target is a fatal (exit 2)
+/// before anything is touched, because the verify gate asserts UTF-8.
+#[test]
+fn fix_rejects_non_utf8_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "x.cpp", GBK);
+    let original = fs::read(root.join("x.cpp")).unwrap();
+
+    let code = run_fix(&args(&root, None), |a| {
+        a.target = Some(TargetEncoding::Gb18030)
+    });
+    assert_eq!(code, 2);
+    assert_eq!(
+        fs::read(root.join("x.cpp")).unwrap(),
+        original,
+        "a rejected fix must not touch the tree"
+    );
+}
+
+/// Diff requires real utf8-forge reports (a `files` array) and compares paths
+/// relative to each report's root, so the same tree under two roots diffs
+/// clean while a non-report JSON is fatal.
+#[test]
+fn diff_schema_check_and_root_relativization() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree1 = dir.path().join("tree1");
+    let tree2 = dir.path().join("tree2");
+    for root in [&tree1, &tree2] {
+        fs::create_dir_all(root).unwrap();
+        put(root, "a.cpp", b"same");
+        put(root, "b.h", b"same");
+    }
+    let r1 = dir.path().join("r1.json");
+    let r2 = dir.path().join("r2.json");
+    assert_eq!(run_tree(Commands::Scan, &args(&tree1, Some(&r1))), 0);
+    assert_eq!(run_tree(Commands::Scan, &args(&tree2, Some(&r2))), 0);
+
+    // Same tree under two roots → clean diff (paths relativized per root).
+    let dargs = DiffArgs {
+        before: r1.clone(),
+        after: r2.clone(),
+        report: None,
+        fail_on_change: false,
+    };
+    assert_eq!(
+        utf8_forge::run(Cli {
+            command: Commands::Diff(dargs)
+        }),
+        0
+    );
+
+    // --fail-on-change on a clean diff stays 0.
+    let dargs = DiffArgs {
+        before: r1.clone(),
+        after: r2.clone(),
+        report: None,
+        fail_on_change: true,
+    };
+    assert_eq!(
+        utf8_forge::run(Cli {
+            command: Commands::Diff(dargs)
+        }),
+        0
+    );
+
+    // Non-report JSON is fatal, not an empty baseline.
+    let wrong = dir.path().join("wrong.json");
+    fs::write(&wrong, r#"{"schema": "wrong"}"#).unwrap();
+    let dargs = DiffArgs {
+        before: wrong.clone(),
+        after: r2.clone(),
+        report: None,
+        fail_on_change: false,
+    };
+    assert_eq!(
+        utf8_forge::run(Cli {
+            command: Commands::Diff(dargs)
+        }),
+        2
+    );
+    fs::write(&wrong, "[]").unwrap();
+    let dargs = DiffArgs {
+        before: wrong,
+        after: r2,
+        report: None,
+        fail_on_change: false,
+    };
+    assert_eq!(
+        utf8_forge::run(Cli {
+            command: Commands::Diff(dargs)
+        }),
+        2
+    );
+}
+
+/// diff --report writes the diff document to a file (branch coverage).
+#[test]
+fn diff_report_file_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", GBK);
+    let r1 = dir.path().join("r1.json");
+    let r2 = dir.path().join("r2.json");
+    assert_eq!(run_tree(Commands::Scan, &args(&root, Some(&r1))), 0);
+    fs::write(root.join("a.cpp"), UTF8).unwrap();
+    assert_eq!(run_tree(Commands::Scan, &args(&root, Some(&r2))), 0);
+
+    let out = dir.path().join("diff.json");
+    let dargs = DiffArgs {
+        before: r1,
+        after: r2,
+        report: Some(out.clone()),
+        fail_on_change: true,
+    };
+    let code = utf8_forge::run(Cli {
+        command: Commands::Diff(dargs),
+    });
+    assert_eq!(code, 1, "the drift must trip --fail-on-change");
+    let doc = read_report(&out);
+    assert_eq!(doc["mode"], "diff");
+    assert_eq!(doc["summary"]["action_changed"], 1);
+    assert_eq!(doc["changed"][0]["path"], "a.cpp");
+}
+
+/// Oversized files are bucketed without affecting the scan verdict, and the
+/// summary identity `total == buckets + errors + too_large` holds.
+#[test]
+fn scan_buckets_oversized_files_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "big.cpp", b"longer-than-two-bytes");
+    put(&root, "small.cpp", b"ok");
+
+    let report = dir.path().join("r.json");
+    let mut a = args(&root, Some(&report));
+    a.max_file_size = Some(2);
+    assert_eq!(run_tree(Commands::Scan, &a), 0, "too_large is not an error");
+    let doc = read_report(&report);
+    let s = &doc["summary"];
+    assert_eq!(s["too_large"], 1);
+    assert_eq!(s["total_files"], 2);
+    assert_eq!(s["candidates"], 1, "candidates = total - too_large");
+    let buckets = s["utf8"].as_u64().unwrap()
+        + s["utf8_bom"].as_u64().unwrap()
+        + s["utf16le"].as_u64().unwrap()
+        + s["utf16be"].as_u64().unwrap()
+        + s["utf32le"].as_u64().unwrap()
+        + s["utf32be"].as_u64().unwrap()
+        + s["gb18030"].as_u64().unwrap()
+        + s["unknown"].as_u64().unwrap();
+    assert_eq!(buckets + s["errors"].as_u64().unwrap(), s["candidates"]);
+    assert_eq!(
+        buckets + s["errors"].as_u64().unwrap() + s["too_large"].as_u64().unwrap(),
+        s["total_files"]
+    );
+}
+
+/// An empty file is already at the target encoding: unchanged, never written.
+#[test]
+fn convert_empty_file_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "empty.cpp", b"");
+    let report = dir.path().join("r.json");
+    assert_eq!(run_convert(&args(&root, Some(&report)), |_| {}), 0);
+    let doc = read_report(&report);
+    assert_eq!(doc["files"][0]["action"], "unchanged");
+    assert_eq!(doc["files"][0]["bytes_before"], 0);
+}
+
+/// A utf-8-bom target converges in one pass; the second pass changes nothing.
+#[test]
+fn utf8_bom_target_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "x.cpp", UTF8);
+
+    let report1 = dir.path().join("r1.json");
+    let code1 = run_convert(&args(&root, Some(&report1)), |a| {
+        a.target = Some(TargetEncoding::Utf8Bom)
+    });
+    assert_eq!(code1, 0);
+    assert_eq!(read_report(&report1)["summary"]["converted"], 1);
+
+    let report2 = dir.path().join("r2.json");
+    let code2 = run_convert(&args(&root, Some(&report2)), |a| {
+        a.target = Some(TargetEncoding::Utf8Bom)
+    });
+    assert_eq!(code2, 0);
+    let doc2 = read_report(&report2);
+    assert_eq!(doc2["summary"]["already_utf8"], 1);
+    assert_eq!(doc2["summary"]["converted"], 0);
+}
+
+/// Fix supports --backup-dir: originals are mirrored before the rewrite.
+#[test]
+fn fix_with_backup_dir_mirrors_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "x.cpp", GBK);
+    let backup = dir.path().join("backup");
+
+    let code = run_fix(&args(&root, None), |a| {
+        a.backup_dir = Some(backup.clone());
+    });
+    assert_eq!(code, 0);
+    let backed = backup.join("x.cpp");
+    assert_eq!(fs::read(&backed).unwrap(), GBK, "backup holds the original");
+    assert_eq!(fs::read(root.join("x.cpp")).unwrap(), UTF8);
+}
+
+/// An explicit `--ext` that normalizes to nothing is fatal, not a silent
+/// zero-file scan.
+#[test]
+fn ext_list_normalizing_to_empty_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+
+    let mut a = args(&root, None);
+    a.ext = vec![String::new()];
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+}
+
+/// `--output` is only meaningful with `--url`; the parser rejects the
+/// tree-mode combination at the clap level (exit 2).
+#[test]
+fn output_flag_requires_url() {
+    let err = Cli::try_parse_from(["utf8-forge", "convert", "--root", ".", "--output", "o.bin"]);
+    assert!(err.is_err(), "--output without --url must be a parse error");
+    let ok = Cli::try_parse_from([
+        "utf8-forge",
+        "convert",
+        "--root",
+        ".",
+        "--url",
+        "https://example.com/a.cpp",
+        "--output",
+        "o.bin",
+    ]);
+    assert!(ok.is_ok(), "--output with --url must parse");
+}
+
+/// An invalid `[convert].target` value is fatal in every tree mode, naming
+/// the config key — scan/verify never silently ignore the section.
+#[test]
+fn invalid_config_target_is_fatal_for_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+    let cfg = dir.path().join("bad.toml");
+    fs::write(&cfg, "[convert]\ntarget = \"bogus\"\n").unwrap();
+
+    let mut a = args(&root, None);
+    a.config = Some(cfg);
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+    assert_eq!(run_tree(Commands::Verify, &a), 2);
+}
+
+/// An unreadable auto-discovered .utf8forgeignore warns and continues the
+/// scan without the ignore layer instead of failing the run.
+#[test]
+fn unreadable_auto_ignore_file_warns_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+    let ignore = root.join(".utf8forgeignore");
+    fs::write(&ignore, "a.cpp\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ignore, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        // Non-unix: keep the file readable; the branch is covered on unix.
+        return;
+    }
+
+    let report = dir.path().join("r.json");
+    assert_eq!(
+        run_tree(Commands::Scan, &args(&root, Some(&report))),
+        0,
+        "the unreadable ignore file must not fail the run"
+    );
+    let doc = read_report(&report);
+    assert_eq!(
+        doc["summary"]["total_files"], 1,
+        "a.cpp is scanned because the ignore layer was dropped with a warning"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&ignore, fs::Permissions::from_mode(0o644));
+    }
 }

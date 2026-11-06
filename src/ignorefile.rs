@@ -124,16 +124,6 @@ impl IgnoreFile {
         }
         verdict
     }
-
-    /// Number of compiled patterns (used to detect "comments only" files).
-    pub fn len(&self) -> usize {
-        self.patterns.len()
-    }
-
-    /// True when no patterns were compiled.
-    pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -189,7 +179,9 @@ mod tests {
     #[test]
     fn comments_blank_lines_and_crlf() {
         let f = IgnoreFile::parse("# comment\r\n\r\n*.tmp\r\n").unwrap();
-        assert_eq!(f.len(), 1);
+        // The comment line produced no pattern: a non-matching path stays
+        // kept while the *.tmp rule still applies.
+        assert!(!f.ignores(&["keep.txt"], false));
         let comps: Vec<&str> = "x.tmp".split('/').collect();
         assert!(f.ignores(&comps, false));
     }
@@ -209,8 +201,7 @@ mod tests {
     fn backslash_is_a_literal_not_a_separator() {
         // compile_raw keeps `\` literal; this pattern can never match a
         // normal component, but it must COMPILE (no normalization).
-        let f = IgnoreFile::parse("a\\b").unwrap();
-        assert_eq!(f.len(), 1);
+        assert!(IgnoreFile::parse("a\\b").is_ok());
         assert!(!ign("a\\b", "a/b", false));
     }
 

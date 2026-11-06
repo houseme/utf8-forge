@@ -321,3 +321,89 @@ fn convert_url_identical_refetch_is_unchanged_no_rewrite() {
     assert_eq!(doc["files"][0]["action"], "unchanged");
     assert_eq!(doc["summary"]["already_utf8"], 1);
 }
+
+/// A decode-invalid payload yields exactly one error record (decode_error),
+/// exit 1, and no output file.
+#[test]
+fn fetch_decode_error_records_once_and_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("bad.cpp");
+    let report = dir.path().join("fetch-report.json");
+    // UTF-16LE BOM + an unpaired high surrogate → strict decode refuses.
+    let body: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0xD8, 0x00, 0xD8];
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(body.len()),
+        body,
+        close_without_length: false,
+    });
+    let args = convert_url_args(url, out.clone(), report.clone(), 1024);
+    assert_eq!(run(Commands::Convert(args).into()), 1);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(doc["summary"]["decode_errors"], 1);
+    assert!(
+        doc["files"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("decode_error")
+    );
+    assert!(!out.exists(), "a failed fetch must not write the output");
+}
+
+/// The derived output path's parent directories are created on demand.
+#[test]
+fn fetch_output_parent_dirs_are_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("deep").join("nested").join("out.cpp");
+    let report = dir.path().join("fetch-report.json");
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(GBK_NIHAO.len()),
+        body: GBK_NIHAO.to_vec(),
+        close_without_length: false,
+    });
+    let args = convert_url_args(url, out.clone(), report, 1024);
+    assert_eq!(run(Commands::Convert(args).into()), 0);
+    assert_eq!(fs::read(&out).unwrap(), UTF8_NIHAO);
+}
+
+/// `--config` has no effect in fetch mode (the only mergeable key,
+/// [convert].target, would silently change nothing), so the combination is
+/// fatal before any network access.
+#[test]
+fn fetch_with_config_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("forge.toml");
+    fs::write(&cfg, "[convert]\ntarget = \"gb18030\"\n").unwrap();
+    let args = ConvertArgs {
+        common: TreeArgs {
+            config: Some(cfg),
+            ..Default::default()
+        },
+        url: Some("http://127.0.0.1:9/never-reached.cpp".into()),
+        ..Default::default()
+    };
+    assert_eq!(run(Commands::Convert(args).into()), 2);
+}
+
+/// Fetch runs the same report pre-flight as tree modes: an unusable report
+/// path aborts (exit 2) before the download happens.
+#[test]
+fn fetch_report_preflight_runs_before_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.cpp");
+    // The report path is an existing directory → fatal, nothing fetched.
+    let report_dir = dir.path().join("report-dir");
+    std::fs::create_dir_all(&report_dir).unwrap();
+    let args = ConvertArgs {
+        common: TreeArgs {
+            report: Some(report_dir),
+            ..Default::default()
+        },
+        url: Some("http://127.0.0.1:9/never-reached.cpp".into()),
+        output: Some(out.clone()),
+        ..Default::default()
+    };
+    assert_eq!(run(Commands::Convert(args).into()), 2);
+    assert!(!out.exists(), "the pre-flight must abort before any output");
+}
