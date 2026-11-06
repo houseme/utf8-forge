@@ -28,13 +28,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest, windows-latest ]
+        features: [ default, all, no-default-features ]
         include:
           # Default feature set (includes `remote` — the reqwest fetcher).
           - features: "default"
+            cargo_args: ""
           # All features — same set today; guards future feature additions.
           - features: "all"
+            cargo_args: "--all-features"
           # Local-only build without reqwest (README "Install", exit-2 message).
           - features: "no-default-features"
+            cargo_args: "--no-default-features"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -44,7 +48,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build (lib + bin)
-        run: cargo build --locked ${{ matrix.features == 'default' && '' || (matrix.features == 'all' && '--all-features' || '--no-default-features') }}
+        run: cargo build --locked ${{ matrix.cargo_args }}
 
       - name: Verify both targets are produced
         if: matrix.os == 'ubuntu-latest' && matrix.features == 'default'
@@ -54,7 +58,7 @@ jobs:
           ./target/debug/utf8-forge --version
 
       - name: Test
-        run: cargo test --locked ${{ matrix.features == 'default' && '' || (matrix.features == 'all' && '--all-features' || '--no-default-features') }}
+        run: cargo test --locked ${{ matrix.cargo_args }}
 
   # ── Functional smoke: scan → dry-run → convert → verify → idempotence ───────
 
@@ -78,6 +82,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          expect_exit() {
+            local expected_status="$1"
+            shift
+            local actual_status=0
+            "$@" || actual_status=$?
+            if [ "$actual_status" -ne "$expected_status" ]; then
+              printf 'expected exit %s, got %s for %s\n' "$expected_status" "$actual_status" "$*" >&2
+              return 1
+            fi
+          }
+
           BIN=./target/release/utf8-forge
           ROOT=$(mktemp -d)/server
           mkdir -p "$ROOT/dep"
@@ -91,10 +106,10 @@ jobs:
           printf 'dep\n'                   > "$ROOT/dep/lib.cpp"
 
           # scan: unknown present → exit 1; convert dry-run: issues → exit 1;
-          # real convert: decode_error remains → exit 1.
-          "$BIN" scan    --root "$ROOT" --report scan.json --verbose && exit 1 || test $? -eq 1
-          "$BIN" convert --root "$ROOT" --dry-run        --report dry.json  && exit 1 || test $? -eq 1
-          "$BIN" convert --root "$ROOT" --backup-dir backup                 && exit 1 || test $? -eq 1
+          # real convert: unknown file remains → exit 1.
+          expect_exit 1 "$BIN" scan    --root "$ROOT" --report scan.json --verbose
+          expect_exit 1 "$BIN" convert --root "$ROOT" --dry-run --report dry.json
+          expect_exit 1 "$BIN" convert --root "$ROOT" --backup-dir backup
 
           # Protected and unknown files keep their original bytes.
           cmp "$ROOT/dep/lib.cpp"  <(printf 'dep\n')
@@ -108,11 +123,11 @@ jobs:
 
           # Idempotence: second convert changes 0 bytes;
           # it still exits 1 because the unknown file is intentionally left.
-          "$BIN" convert --root "$ROOT" --report second.json -q && exit 1 || test $? -eq 1
+          expect_exit 1 "$BIN" convert --root "$ROOT" --report second.json -q
           python3 -c "import json;d=json.load(open('second.json'));assert d['summary']['converted']==0, d['summary']"
 
           # Gate: verify flags only the unknown file (exit 3).
-          "$BIN" verify --root "$ROOT" && exit 1 || test $? -eq 3
+          expect_exit 3 "$BIN" verify --root "$ROOT"
 
   # ── Lint: fmt + clippy quality gates ──────────────────────────────────────
 
