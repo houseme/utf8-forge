@@ -21,7 +21,7 @@
 //! no recursive link following.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -63,53 +63,58 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
     // Stream the body into a unique temp file, enforcing the cap per chunk:
     // an oversized payload never accumulates in memory.
     let tmp: PathBuf = std::env::temp_dir().join(format!(".utf8-forge-fetch-{}", unique_suffix()));
-    let cleanup = |p: &Path| {
-        let _ = fs::remove_file(p);
-    };
-    let mut file = fs::File::create(&tmp)
+    read_body_to_temp(&mut resp, max_size, &tmp)
+}
+
+/// Spool a bounded body through an exclusively created temporary file.
+/// Creation failures preserve any existing path. Once created, the file is
+/// closed before cleanup on both success and error, including on Windows.
+fn read_body_to_temp(
+    reader: &mut impl Read,
+    max_size: u64,
+    tmp: &Path,
+) -> Result<Vec<u8>, ForgeError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(tmp)
         .map_err(|e| ForgeError::Fetch(format!("create temp file failed: {e}")))?;
-    let mut total: u64 = 0;
-    let mut buf = [0u8; 8192];
-    loop {
-        match resp.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n as u64;
-                if total > max_size {
-                    cleanup(&tmp);
-                    return Err(ForgeError::TooLarge {
-                        size: total,
-                        max: max_size,
-                    });
-                }
-                if let Err(e) = file.write_all(&buf[..n]) {
-                    cleanup(&tmp);
-                    return Err(ForgeError::Fetch(format!("write temp file failed: {e}")));
-                }
+
+    let result = (|| {
+        // Move the handle into this scope so every return closes it before
+        // removal. Reading back through this handle avoids reopening a path
+        // that another process could have replaced after creation.
+        let mut file = file;
+        let mut total: u64 = 0;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| ForgeError::Fetch(format!("read body failed: {e}")))?;
+            if n == 0 {
+                break;
             }
-            Err(e) => {
-                cleanup(&tmp);
-                return Err(ForgeError::Fetch(format!("read body failed: {e}")));
+            total += n as u64;
+            if total > max_size {
+                return Err(ForgeError::TooLarge {
+                    size: total,
+                    max: max_size,
+                });
             }
+            file.write_all(&buf[..n])
+                .map_err(|e| ForgeError::Fetch(format!("write temp file failed: {e}")))?;
         }
-    }
-    // Defense-in-depth: the per-chunk check already guarantees this.
-    if total > max_size {
-        cleanup(&tmp);
-        return Err(ForgeError::TooLarge {
-            size: total,
-            max: max_size,
-        });
-    }
-    let body = match fs::read(&tmp) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            cleanup(&tmp);
-            return Err(ForgeError::Fetch(format!("read temp file failed: {e}")));
-        }
-    };
-    cleanup(&tmp);
-    Ok(body)
+        file.rewind()
+            .map_err(|e| ForgeError::Fetch(format!("read temp file failed: {e}")))?;
+        let mut body = Vec::new();
+        file.take(total)
+            .read_to_end(&mut body)
+            .map_err(|e| ForgeError::Fetch(format!("read temp file failed: {e}")))?;
+        Ok(body)
+    })();
+    let _ = fs::remove_file(tmp);
+    result
 }
 
 /// Derive the output path from the URL when `--output` is omitted:
@@ -146,6 +151,102 @@ fn has_extension(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+
+    #[test]
+    fn streaming_temp_is_removed_after_exact_limit_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        let body = vec![b'x'; 8192 + 13];
+        assert_eq!(
+            read_body_to_temp(&mut body.as_slice(), body.len() as u64, &tmp).unwrap(),
+            body
+        );
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn streaming_temp_is_removed_after_size_limit_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        // The first chunk is persisted before the second exceeds the cap.
+        let body = vec![b'x'; 8193];
+        assert!(matches!(
+            read_body_to_temp(&mut body.as_slice(), 8192, &tmp),
+            Err(ForgeError::TooLarge {
+                size: 8193,
+                max: 8192
+            })
+        ));
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn streaming_temp_accepts_empty_body_with_zero_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        assert!(
+            read_body_to_temp(&mut b"".as_slice(), 0, &tmp)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!tmp.exists());
+        assert!(matches!(
+            read_body_to_temp(&mut b"x".as_slice(), 0, &tmp),
+            Err(ForgeError::TooLarge { size: 1, max: 0 })
+        ));
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn streaming_temp_is_removed_after_body_read_failure() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected body read failure"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        let mut reader = b"partial body".as_slice().chain(FailingReader);
+        let error = read_body_to_temp(&mut reader, 1024, &tmp).unwrap_err();
+        assert!(
+            matches!(error, ForgeError::Fetch(ref message) if message.starts_with("read body failed:"))
+        );
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn streaming_temp_collision_preserves_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        fs::write(&tmp, b"original").unwrap();
+        let mut reader = b"download".as_slice();
+        let error = read_body_to_temp(&mut reader, 1024, &tmp).unwrap_err();
+        assert!(
+            matches!(error, ForgeError::Fetch(ref message) if message.starts_with("create temp file failed:"))
+        );
+        assert_eq!(fs::read(&tmp).unwrap(), b"original");
+        assert_eq!(
+            reader, b"download",
+            "the body must not be read after creation fails"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_temp_collision_preserves_symlink_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        let target = dir.path().join("original.cpp");
+        fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, &tmp).unwrap();
+        assert!(read_body_to_temp(&mut b"download".as_slice(), 1024, &tmp).is_err());
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
 
     #[test]
     fn derive_keeps_extensioned_segments() {
