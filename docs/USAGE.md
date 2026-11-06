@@ -21,6 +21,8 @@ Commands: `scan`, `convert`, `verify`, `fix`, `diff`.
 ### 2.1 `scan`
 
 Detect encodings only. Writes nothing. Emits a summary + optional JSON report.
+Every unknown file also prints a stderr problem line (`unknown <path>`),
+consistent with the other modes (exit stays `1`).
 
 ```bash
 utf8-forge scan --root D:\server --report scan.json
@@ -56,10 +58,14 @@ utf8-forge convert --url https://example.com/a.cpp --output ./a.cpp
 Exit codes:
 
 - `0` — success (no unexpected errors).
-- `1` — some files `unknown` / `decode_error` / `io_error`; with `--url`, also
-  `fetch_error` (HTTP/TLS/timeout failure) and an oversized payload.
+- `1` — some files `unknown` / `decode_error` / `encode_error` / `io_error`;
+  with `--url`, also `fetch_error` (HTTP/TLS/timeout failure) and an oversized
+  payload. Each problem prints one stderr line; with `--url`, a decode error
+  reports against the output path.
 - `2` — fatal (bad args, missing root, flag conflicts, `--backup-dir` inside
-  `--root` or combined with `--url`).
+  `--root` or combined with `--url`, `--config` combined with `--url`,
+  unwritable `--report` location). With `--url` the `--report` pre-flight runs
+  before the download starts, so a failure writes nothing.
 
 ### 2.3 `verify`
 
@@ -90,23 +96,27 @@ utf8-forge fix --root D:\server --dry-run
 ```
 
 Flags: the full tree flag set plus `--target` / `--dry-run` / `--backup-dir`.
-No `--url` / `--output` (remote fetch stays convert-only).
+No `--url` / `--output` (remote fetch stays convert-only). `--target` accepts
+only the default `utf-8`: any other value (CLI or config) is a fatal exit 2
+before anything is touched, because the verify gate asserts UTF-8 without BOM.
 
 Exit codes:
 
 - `0` — conversion ran and every file passed the verify gate.
-- `3` — the gate wins: any file fails the verify pass (not UTF-8 at the target,
+- `3` — the gate wins: any file fails the verify pass (not UTF-8 without BOM,
   `unknown`, oversized, unreadable — all fail closed). The report carries
   `verify_failed_files`.
-- `1` — convert-side issues (`unknown` / `decode_error` / `io_error`) with no
-  verify failure.
-- `2` — fatal (bad args, missing root, `--backup-dir` inside `--root`).
+- `1` — convert-side issues (`unknown` / `decode_error` / `encode_error` /
+  `io_error`) with no verify failure.
+- `2` — fatal (bad args, missing root, `--backup-dir` inside `--root`,
+  non-`utf-8` `--target`).
 
 ### 2.5 `diff`
 
-Compare two utf8-forge JSON reports per path. Any report mode with `files[]`
-works (`fix` reports expose their convert records; verify outcomes are not
-compared).
+Compare two utf8-forge JSON reports per path. Inputs must be utf8-forge
+reports containing a `files[]` array — anything else (wrong schema, a bare
+array, malformed JSON) is a fatal exit 2 (`fix` reports expose their convert
+records; verify outcomes are not compared).
 
 ```bash
 utf8-forge diff --before apply.json --after apply2.json
@@ -114,19 +124,27 @@ utf8-forge diff --before apply.json --after apply2.json
 # CI gate: non-empty diff → exit 1
 utf8-forge diff --before a.json --after b.json --fail-on-change
 
-# Write the diff JSON to a file (stdout then carries the summary line only)
+# Write the diff JSON to a file (the summary line always goes to stderr)
 utf8-forge diff --before a.json --after b.json --report diff.json
+
+# Without --report, stdout carries only the JSON document: `diff … | jq .` works
+utf8-forge diff --before a.json --after b.json | jq .
 ```
 
-Paths are compared as exact strings — both reports must come from the same
-root (differing `root` fields print a warning and continue).
+Record paths are compared **relative to each report's `root`**: the root
+prefix is stripped (separators normalized to `/`) before comparing, so
+identical trees scanned under different root directories no longer diff as
+full churn. Differing `root` fields still print a warning; the diff document
+carries optional `before_root` / `after_root` fields (omitted when the source
+report has no `root`).
 
 Exit codes:
 
 - `0` — comparison finished (differences do NOT change the exit code).
 - `1` — `--fail-on-change` and the diff is non-empty (added + removed +
   changed > 0).
-- `2` — missing or malformed input report.
+- `2` — missing input report, or input that is not a utf8-forge report with a
+  `files[]` array.
 
 ---
 
@@ -135,37 +153,42 @@ Exit codes:
 | Flag                       | Default         | Notes                                                                                                                                                                      |
 |----------------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `-r, --root <PATH>`        | `.`             | Recursive root                                                                                                                                                             |
-| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`)                                                                                                    |
+| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`); an empty normalized list (`--ext ""`) is fatal (exit 2)                                           |
 | `-x, --exclude <LIST>`     | see DESIGN §5.2 | Appended to default excludes                                                                                                                                               |
 | `-X, --exclude-ext <LIST>` | empty           | Appended                                                                                                                                                                   |
 | `--exclude-glob <GLOB>`    | empty           | Repeatable. Case-insensitive glob over root-relative path components; `/`-separated, `\` accepted; `**` spans components, `*`/`?` match within one; empty pattern → exit 2 |
 | `--include-rc`             | false           | Adds `.rc/.rc2/.dlg`                                                                                                                                                       |
 | `--include-msbuild`        | false           | Adds `.sln/.vcxproj/...`                                                                                                                                                   |
 | `--include-hidden`         | false           | Processes dot-prefixed files and directories                                                                                                                               |
-| `--config <PATH>`          | none            | TOML config supplying defaults; CLI flags override config values; missing/malformed file or unknown keys → exit 2 (ignored by fetch mode)                                  |
+| `--config <PATH>`          | none            | TOML config supplying defaults; CLI flags override config values; missing/malformed file or unknown keys → exit 2; fatal (exit 2) combined with `--url` (fetch reads no config) |
 | `--ignore-file <PATH>`     | auto            | Gitignore-style exclusions; fatal (exit 2) when the explicit file is missing; replaces auto-discovery of `<root>/.utf8forgeignore`                                         |
 | `--no-ignore-file`         | false           | Disables ignore-file handling entirely, including auto-discovery                                                                                                           |
-| `-t, --target <ENC>`       | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert, fix)                                                                                                              |
+| `-t, --target <ENC>`       | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert; fix accepts only the default `utf-8`)                                                                             |
 | `--dry-run`                | false           | No writes (convert, fix)                                                                                                                                                   |
 | `--backup-dir <PATH>`      | none            | Backup before overwrite (convert, fix)                                                                                                                                     |
 | `--max-file-size <BYTES>`  | 200 MiB         | Skip oversized                                                                                                                                                             |
-| `--threads <N>`            | CPU count       | Rayon pool; `0` clamps to `1`                                                                                                                                              |
-| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning                                                                                            |
+| `--threads <N>`            | CPU count       | Rayon pool; values below `1` clamp to `1`                                                                                                                                  |
+| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning; an unwritable report directory, or a report path that is an existing directory, is fatal (exit 2) before any processing |
 | `--url <URL>`              | none            | **Remote fetch (convert only)**; ignores `--root`                                                                                                                          |
-| `--output <PATH>`          | derived         | Destination for `--url`                                                                                                                                                    |
+| `--output <PATH>`          | derived         | Destination for `--url` (requires `--url`)                                                                                                                                 |
 | `-q, --quiet`              | false           | Errors only                                                                                                                                                                |
 | `-v, --verbose`            | false           | Per-file detail                                                                                                                                                            |
 
 **Per-command flag surface**: `--target`, `--dry-run` and `--backup-dir` exist
-on `convert` and `fix`. `scan` and `verify` reject them (clap error, exit 2).
-`--url` / `--output` are convert-only. `diff` accepts only `--before`,
-`--after`, `--report` and `--fail-on-change`.
+on `convert` and `fix` (`fix` accepts only `--target utf-8`). `scan` and
+`verify` reject them (clap error, exit 2). `--url` / `--output` are
+convert-only; `--output` requires `--url` (clap error, exit 2). `diff` accepts
+only `--before`, `--after`, `--report` and `--fail-on-change`.
+
+> Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
+> `<EXCLUDE_EXT>`); this document uses descriptive names for the same values.
 
 Conflicts (fatal, exit 2):
 
 - `--include-rc` + `--exclude-ext rc|rc2|dlg`
 - `--include-msbuild` + `--exclude-ext sln|vcxproj|vcproj|props|targets|filters|user`
 - `--ignore-file` + `--no-ignore-file`
+- `--config` + `--url` (fetch reads no config)
 
 **Notes**:
 
@@ -175,7 +198,7 @@ Conflicts (fatal, exit 2):
 - (b) `--backup-dir` cannot be combined with `--url` (fatal, exit 2).
 - (c) `--backup-dir` inside `--root` is rejected (fatal, exit 2); an existing
   directory is placement-checked even under `--dry-run`.
-- (d) `--threads 0` clamps to `1`.
+- (d) `--threads` values below `1` clamp to `1`.
 - (e) `--url` ignores `--root`.
 - (f) `--report` parent dirs are created; the report path itself is excluded
   from scanning.
@@ -190,7 +213,11 @@ Conflicts (fatal, exit 2):
 - (i) config file: precedence CLI > config > built-in defaults; list values
   REPLACE across layers (never concatenate). `--target` and `--max-file-size`
   apply their CLI value only when the flag is passed, otherwise the config
-  value, otherwise the default. Fetch mode ignores `--config`.
+  value, otherwise the default. An invalid `[convert].target` value is fatal
+  (exit 2) in every tree mode — including `scan` / `verify` — and names the
+  config key; in `fix`, any non-`utf-8` target (CLI or config) is fatal.
+  Fetch mode reads no config: `--config` combined with `--url` is fatal
+  (exit 2).
 
 ---
 
@@ -198,14 +225,22 @@ Conflicts (fatal, exit 2):
 
 ### 4.1 Detection order
 
-UTF-8 BOM → UTF-32 LE BOM → UTF-32 BE BOM → UTF-16 LE BOM → UTF-16 BE BOM →
+UTF-8 BOM → UTF-32 BE BOM (`00 00 FE FF`) → UTF-32 LE / UTF-16 LE (shared
+`FF FE` prefix; the next two bytes `00 00` decide UTF-32 LE) → UTF-16 BE →
 strict UTF-8 → strict GB18030 → `Unknown`.
 
-The UTF-32 BOMs (`FF FE 00 00` LE, `00 00 FE FF` BE) are checked before the
-2-byte UTF-16 BOMs (WHATWG-style longest-prefix precedence). Documented
-ambiguity: a UTF-16LE file whose first character is U+0000 shares those
-leading bytes; it is classified `utf-32le` and then fails strict UTF-32 decode
-loudly (`decode_error`, never silent mojibake).
+`00 00 FE FF` (UTF-32 BE) is checked before `FF FE` — WHATWG-style
+longest-prefix precedence. Consequence: a file starting `FF FE 00 00` is
+always decoded as UTF-32LE — a UTF-16LE encoding whose first character is
+U+0000 is genuinely indistinguishable there. If the payload is not also valid
+UTF-32, the strict UTF-32 decode fails loudly (`decode_error`, never silent
+mojibake); if it is, the file simply reads as UTF-32. That ambiguity is why
+`convert --target utf-16le` refuses content whose first character is U+0000:
+the output would begin `FF FE 00 00`, byte-identical to the UTF-32LE BOM, so a
+second run would mis-read the file as UTF-32LE and corrupt it. Such a file is
+recorded as an `error` row with an `encode_error` reason (exit 1; original
+bytes untouched), counted under the summary's `encode_errors`. `--target utf-16be` is safe (`FE FF 00 00` re-reads as
+UTF-16BE).
 
 UTF-32 is read-only: strict decode rejects surrogates, scalar values above
 `0x10FFFF`, and misaligned tails (payload length not a multiple of 4 after the
@@ -216,7 +251,9 @@ BOM). There is **no** UTF-32 write target (`--target utf-32le` → exit 2), and
 
 - Default output has **no BOM**.
 - `--target utf-8-bom` adds `EF BB BF`.
-- `--target utf-16le/be` emits `FF FE` / `FE FF` manually (encoding_rs does not).
+- `--target utf-16le/be` emits `FF FE` / `FE FF` manually (encoding_rs does not);
+  `utf-16le` refuses content whose first character is U+0000 (see §4.1 — the
+  output would collide with the UTF-32LE BOM).
 - Input BOM is stripped during decode.
 - Only the real leading BOM is stripped; a second BOM is content (U+FEFF).
 
@@ -336,8 +373,9 @@ threads = 8
 
 Precedence is CLI > config > defaults. List values REPLACE across layers (never concatenate). Missing, malformed, or
 unknown-key files are fatal (exit 2) — messages carry the TOML line/column. `root`, `report`, `dry-run`,
-`url`, `output`, and quiet/verbose are deliberately absent from the schema;
-fetch mode ignores `--config`.
+`url`, `output`, `ignore_file`, and quiet/verbose are deliberately absent from
+the schema (`ignore_file` in TOML is a fatal unknown key); `--config` combined
+with `--url` is fatal too — fetch mode reads no config.
 
 ---
 
@@ -347,13 +385,16 @@ JSON report schema is documented in `EXECUTION.md §12`.
 
 Key fields:
 
-- `summary.total_files` — every file visited.
-- `summary.candidates` — files matching whitelist.
+- `summary.total_files` — whitelisted files that produced records (the walker
+  emits only whitelisted files).
+- `summary.candidates` — files actually processed: `total_files − too_large`
+  in scan / convert / fetch / fix; `total_files` in verify (oversized files
+  are gate-`failed`, never subtracted).
 - `files[].action` — full list: `detected` | `passed` | `failed` |
   `would_convert` | `converted` | `unchanged` | `skipped_unknown` |
   `skipped_too_large` | `error`.
 - `unknown_files` — detection `unknown` (any mode) or `skipped_unknown` in
-  convert; `error_files` — action `error` or verify `failed` (a file may appear
+  convert and fix; `error_files` — action `error` or verify `failed` (a file may appear
   in both; in fix mode verify failures are listed only in
   `verify_failed_files`).
 - `verify_failed_files` — fix mode only: paths whose verify record is `failed`;
@@ -368,10 +409,12 @@ The `summary` block is mode-specific:
 - `scan` — encoding distribution: `utf8` / `utf8_bom` / `utf16le` / `utf16be` /
   `utf32le` / `utf32be` / `gb18030` / `unknown` / `errors` / `too_large`
   (plus `total_files` / `candidates`; `errors` counts unreadable files, so
-  buckets + errors + too_large == candidates).
+  `buckets + errors == candidates` (equivalently
+  `buckets + errors + too_large == total_files`)).
 - `verify` — gate result: `passed` / `failed`.
 - `convert` / `fetch` — outcome counts: `already_utf8` / `converted` /
-  `unknown` / `decode_errors` / `io_errors` / `too_large` / `fetch_error`.
+  `unknown` / `decode_errors` / `encode_errors` / `io_errors` / `too_large` /
+  `fetch_error`.
 - `fix` — convert counters (as above, without `fetch_error`) plus `passed` /
   `failed` from the verify pass over the same tree.
 
@@ -385,7 +428,7 @@ with `--target gb18030`, untouched ASCII files count too.
 | Code | Meaning                                                                                                                                                                        |
 |------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0    | Success (`diff`: comparison finished — differences do not change the exit code unless `--fail-on-change`)                                                                      |
-| 1    | Non-fatal per-file issues (`unknown`, `decode_error`, `io_error`; convert: also `fetch_error`, oversized `--url` payload); `diff --fail-on-change`: the reports differ         |
+| 1    | Non-fatal per-file issues (`unknown`, `decode_error`, `encode_error`, `io_error`; convert: also `fetch_error`, oversized `--url` payload); `diff --fail-on-change`: the reports differ |
 | 2    | Fatal in every command (bad args, missing root, flag conflicts, I/O setup failure); also emitted by clap; `diff`: missing/malformed input report                               |
 | 3    | `verify` found non-UTF-8 whitelisted files; `fix`: any file fails the verify gate (oversized/unreadable count as failed — fail-closed; the gate wins over convert-side issues) |
 

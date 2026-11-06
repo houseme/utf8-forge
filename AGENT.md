@@ -41,7 +41,7 @@ cargo build --release
 
 ---
 
-## 3. Commands (v0.1)
+## 3. Commands
 
 | Command         | Purpose                                       |         Writes?         | Options note                                                       | Exit codes |
 |-----------------|-----------------------------------------------|:-----------------------:|--------------------------------------------------------------------|------------|
@@ -49,7 +49,7 @@ cargo build --release
 | `convert`       | Detect + transcode + atomic write             | ✅ (unless `--dry-run`) | `--target/--dry-run/--backup-dir` are convert/fix-only             | 0 / 1 / 2* |
 | `convert --url` | Fetch → transcode → save                      |           ✅            | `--url/--output`; `--target/--dry-run` allowed, `--root` ignored   | 0 / 1 / 2* |
 | `verify`        | Assert all whitelisted files are UTF-8 no BOM |           ❌            | —                                                                  | 0 / 3 / 2* |
-| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target/--dry-run/--backup-dir`; no `--url/--output` | 0 / 3 / 1 / 2* |
+| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target` (utf-8 only) / `--dry-run` / `--backup-dir`; no `--url/--output` | 0 / 3 / 1 / 2* |
 | `diff`          | Compare two reports per path                  |           ❌            | `--before/--after/--report/--fail-on-change`; reads JSON, writes nothing else | 0 / 1† / 2* |
 
 \* `2` = fatal setup/parse errors (missing root, bad flags, conflicts); also emitted by clap. `scan` and `verify`
@@ -63,32 +63,36 @@ cargo build --release
 | Option              | Default         | Notes                                                            |
 |---------------------|-----------------|------------------------------------------------------------------|
 | `-r, --root`        | `.`             | Recursive                                                        |
-| `-e, --ext`         | See DESIGN §5.1 | **Overrides** default whitelist                                  |
+| `-e, --ext`         | See DESIGN §5.1 | **Overrides** default whitelist; empty normalized list (`--ext ""`) → exit 2 |
 | `-X, --exclude-ext` | empty           | Appended                                                         |
 | `-x, --exclude`     | See DESIGN §5.2 | Appended                                                         |
 | `--exclude-glob`    | empty           | Repeatable; see `docs/USAGE.md §3` for glob semantics            |
 | `--include-rc`      | false           | Adds `.rc/.rc2/.dlg`                                             |
 | `--include-msbuild` | false           | Adds `.sln/.vcxproj/...`                                         |
 | `--include-hidden`  | false           | Processes dot-prefixed files **and** directories                 |
-| `--config`          | none            | TOML defaults; CLI > config > built-ins; missing/malformed/unknown keys → exit 2; ignored by fetch mode |
+| `--config`          | none            | TOML defaults; CLI > config > built-ins; missing/malformed/unknown keys → exit 2; fatal (exit 2) combined with `--url` (fetch reads no config) |
 | `--ignore-file`     | auto            | Gitignore-style exclusions; explicit missing → exit 2; replaces auto-discovery of `<root>/.utf8forgeignore` |
 | `--no-ignore-file`  | false           | Disables ignore-file handling entirely, including auto-discovery |
-| `-t, --target`      | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert, fix)    |
+| `-t, --target`      | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert; fix accepts only the default `utf-8`) |
 | `--dry-run`         | false           | No writes (convert, fix)                                         |
 | `--backup-dir`      | none            | Original bytes preserved (convert, fix)                          |
 | `--max-file-size`   | 200 MiB         | Above → `too_large`                                              |
-| `--threads`         | CPU count       | Rayon pool size (`0` clamps to `1`)                              |
+| `--threads`         | CPU count       | Rayon pool size (values below `1` clamp to `1`)                  |
 | `--report`          | none            | JSON report path (auto-excluded from traversal)                  |
 | `--url`             | none            | **Remote fetch (convert only)**                                  |
-| `--output`          | derived         | Destination for `--url`                                          |
+| `--output`          | derived         | Destination for `--url` (requires `--url`)                       |
 | `-q, --quiet`       | false           | Errors only                                                      |
 | `-v, --verbose`     | false           | Per-file detail                                                  |
+
+Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
+`<EXCLUDE_EXT>`); this table uses descriptive names for the same values.
 
 **Conflicts** (fatal, exit 2):
 
 - `--include-rc` + `--exclude-ext rc|rc2|dlg`
 - `--include-msbuild` + `--exclude-ext sln|vcxproj|vcproj|props|targets|filters|user`
 - `--ignore-file` + `--no-ignore-file`
+- `--config` + `--url` (fetch reads no config)
 
 **Safety notes**:
 
@@ -116,7 +120,7 @@ src/
 ├── fetcher.rs    # Optional remote download; see DESIGN §8
 ├── reporter.rs   # Console + JSON
 ├── differ.rs     # `diff` subcommand report comparison
-└── error.rs      # anyhow-based errors
+└── error.rs      # ForgeError domain errors (categories feed the report); anyhow wraps fatal setup errors
 ```
 
 **Rule**: Every `pub fn`, `pub struct`, and non-obvious `fn` carries a `///` doc comment in **English**. Internal tricky
@@ -239,6 +243,7 @@ See `EXECUTION.md` for concrete steps.
 | `DESIGN.md`           | English               | Architecture & invariants      |
 | `AGENT.md`            | English               | This file                      |
 | `EXECUTION.md`        | English               | `D:\server` rollout playbook   |
+| `ROADMAP.md`          | English               | Planned/done work, release record |
 
 ---
 

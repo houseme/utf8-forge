@@ -87,7 +87,7 @@ utf8-forge scan ^
 {
   "summary": {
     "total_files": 1247,
-    "candidates": 1142,
+    "candidates": 1247,
     "utf8": 1035,
     "utf8_bom": 34,
     "utf16le": 2,
@@ -104,7 +104,7 @@ utf8-forge scan ^
 
 **Check**:
 
-- `gb18030` ≈ 97 (Playbook §1.2);
+- `gb18030` ≈ 171 (Playbook §1.2);
 - `utf16le` ≈ 2 (`GameServer/room/FieldData.cpp` × 2);
 - Every `unknown` is **manually confirmed**.
 
@@ -157,8 +157,8 @@ utf8-forge convert ^
 
 ```text
 [utf8-forge] mode=convert target=utf-8 root=D:\server
-[utf8-forge] scanned=1247  candidates=1142
-[utf8-forge] already_utf8=1035  converted=171  unknown=5  errors=0
+[utf8-forge] scanned=1247  candidates=1247
+[utf8-forge] already_utf8=1035  converted=207  unknown=5  errors=0
 [utf8-forge] duration=8.3s  report=D:\backup\utf8-forge\apply.json
 ```
 
@@ -179,16 +179,19 @@ utf8-forge verify --root D:\server --report D:\backup\utf8-forge\verify1.json
 utf8-forge convert --root D:\server --report D:\backup\utf8-forge\apply2.json
 ```
 
-**Expected**: `converted=0`. If not, stop — check `apply.json` vs `apply2.json` diff for concurrent edits.
-
-> A leftover `converted=1` from a double-BOM UTF-16 file is expected (two-pass
-> convergence); confirm via the apply.json/apply2.json diff before stopping.
-
-The `diff` subcommand makes the comparison mechanical:
+**Expected**: `converted=0`. If not, stop — a third settled run isolates
+concurrent edits:
 
 ```bat
-utf8-forge diff --before D:\backup\utf8-forge\apply.json --after D:\backup\utf8-forge\apply2.json --fail-on-change
+utf8-forge convert --root D:\server --report D:\backup\utf8-forge\apply3.json
+utf8-forge diff --before D:\backup\utf8-forge\apply2.json --after D:\backup\utf8-forge\apply3.json --fail-on-change
 ```
+
+> Comparing run 1 against run 2 always reports drift (every `converted` row
+> becomes `unchanged`), so the diff gate must compare two **settled** runs.
+> Run 1 vs run 2 is still useful read-only: a `changed` entry whose `before`
+> action is `unchanged` means the file was modified between the runs (a
+> concurrent edit, or the expected one-pass double-BOM convergence).
 
 ---
 
@@ -294,7 +297,7 @@ svn diff --summarize > D:\backup\utf8-forge\summary.txt
 
 ---
 
-## 5. Recipes (v0.1)
+## 5. Recipes
 
 ### 5.1 C/C++ + proto/txt Only
 
@@ -356,8 +359,13 @@ utf8-forge convert ^
   `exclude_ext`/`exclude_globs`/`backup_dir` are omitted when empty (empty
   `extensions`/`exclude_dirs` remain).
 - `--dry-run` works with `--url`: fetches and reports, but does not write.
-- `--config` is ignored in fetch mode; the size cap is enforced during
-  download (an oversized payload aborts mid-stream).
+- `--config` cannot be combined with `--url` — fatal (exit 2); fetch reads no
+  config. The same `--report` pre-flight as tree modes (unwritable report
+  directory, or a report path that is an existing directory) runs **before**
+  the download, so a failure writes nothing; a decode error prints exactly one
+  stderr problem line (for the output path).
+- The size cap is enforced during download (an oversized payload aborts
+  mid-stream).
 
 ### 5.6 Reverse: UTF-8 → GB18030 (Legacy Scripts Only)
 
@@ -379,6 +387,7 @@ utf8-forge convert ^
 |-----------------|---------------------------------|---------------------------------------------------|
 | `unknown`       | Not UTF-8 / UTF-16 / UTF-32 / GB18030 | Inspect hex; often a binary with a text extension |
 | `decode_error`  | Legal encoding, truncated bytes | Hex editor; ask original author                   |
+| `encode_error`  | Decodes cleanly but the target encoding would produce unreadable bytes (`utf-16le` + leading U+0000) | Pick another target or drop the leading NUL       |
 | `too_large`     | > `--max-file-size`             | Usually skip; raise limit only if necessary       |
 | `io_error`      | Permission / locked file        | Close the locking process or fix ACLs             |
 | `fetch_error`   | `--url` network/TLS failure     | Check URL, proxy, timeout                         |
@@ -420,7 +429,7 @@ svn status             :: must be empty
 
 ---
 
-## 8. Playbook Mapping (v0.1)
+## 8. Playbook Mapping
 
 | Playbook Phase         | This Manual              | Tool Command                       |
 |------------------------|--------------------------|------------------------------------|
@@ -496,13 +505,13 @@ svn status             :: must be empty
 
 ---
 
-## 12. Appendix: JSON Report Schema (v0.1)
+## 12. Appendix: JSON Report Schema
 
 Optional keys are **omitted when empty**: `url` appears only with `--url`; a
 fetch report omits `root`; `options.exclude_ext` / `exclude_globs` /
 `backup_dir` are omitted when empty/none; `options.ignore_file` is omitted when
 no ignore rules are active; `options.config_file` is omitted without `--config`;
-`files[].detected` is omitted when the file was unreadable;
+`files[].detected` is omitted when the file was not read (unreadable or oversized);
 `verify_failed_files` is omitted when the fix gate is clean.
 
 `options` reflects the post-config effective values (after merging
@@ -511,14 +520,14 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "mode": "convert",                     // scan | convert | verify | fetch | fix
   "root": "D:\\server",                  // omitted in fetch mode
   "url": "https://example.com/a.cpp",    // omitted without --url
   "started_at": "2026-...",              // captured when per-file processing begins
                                          // (tree modes: after traversal; fetch: at request start)
-  "duration_ms": 8300,                   // per-file processing + report assembly
-                                         // (traversal excluded in tree modes)
+  "duration_ms": 8300,                   // per-file processing + console lines (report assembly
+                                         // excluded; traversal excluded in tree modes)
   "options": {
     "target": "utf-8",
     "dry_run": false,
@@ -544,7 +553,7 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
                                            // present only on error/failed records
     }
   ],
-  "unknown_files": [],                   // detection unknown (any mode) or skipped_unknown in convert
+  "unknown_files": [],                   // detection unknown (any mode) or skipped_unknown in convert and fix
   "error_files": [],                     // action error or verify failed — a file may appear in both; in fix
                                          // mode verify failures are listed only in verify_failed_files
   "verify_failed_files": []              // fix mode only: paths whose verify record is failed;
@@ -556,22 +565,24 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 
 ```jsonc
 // scan — encoding distribution:
-{ "total_files": 1247, "candidates": 1142, "utf8": 1035, "utf8_bom": 34,
+{ "total_files": 1247, "candidates": 1247, "utf8": 1035, "utf8_bom": 34,
   "utf16le": 2, "utf16be": 0, "utf32le": 0, "utf32be": 0, "gb18030": 171,
   "unknown": 5, "errors": 0, "too_large": 0 }
-// errors = files that could not be read; buckets + errors + too_large == candidates
+// errors counts unreadable files, so buckets + errors == candidates
+// (equivalently buckets + errors + too_large == total_files)
 
-// verify — gate result:
-{ "total_files": 1247, "candidates": 1142, "passed": 1142, "failed": 0 }
+// verify — gate result (candidates == total_files; oversized files are
+// gate-failed, never subtracted):
+{ "total_files": 1247, "candidates": 1247, "passed": 1242, "failed": 5 }
 
 // convert / fetch — outcome counts:
-{ "total_files": 1247, "candidates": 1142, "already_utf8": 1035, "converted": 171,
-  "unknown": 5, "decode_errors": 0, "io_errors": 0, "too_large": 0, "fetch_error": 0 }
+{ "total_files": 1247, "candidates": 1247, "already_utf8": 1035, "converted": 207,
+  "unknown": 5, "decode_errors": 0, "encode_errors": 0, "io_errors": 0, "too_large": 0, "fetch_error": 0 }
 
 // fix — convert counters (no fetch_error) plus the verify gate on the same tree:
-{ "total_files": 1247, "candidates": 1142, "already_utf8": 1035, "converted": 171,
-  "unknown": 5, "decode_errors": 0, "io_errors": 0, "too_large": 0,
-  "passed": 1142, "failed": 0 }
+{ "total_files": 1247, "candidates": 1247, "already_utf8": 1035, "converted": 207,
+  "unknown": 5, "decode_errors": 0, "encode_errors": 0, "io_errors": 0, "too_large": 0,
+  "passed": 1242, "failed": 5 }
 ```
 
 > `started_at` is captured when per-file processing begins; in tree modes
@@ -580,35 +591,43 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 ### 12.1 diff Output Document
 
 `diff` does not produce a run report; it emits its own document type (to
-`--report` or pretty-printed on stdout):
+`--report`, or pretty-printed on stdout when the flag is absent — the summary
+line always goes to stderr, so `diff … | jq .` works):
 
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "mode": "diff",
-  "before": "apply.json",                // --before value verbatim
-  "after": "apply2.json",                // --after value verbatim
+  "before": "apply2.json",               // --before value verbatim
+  "after": "apply3.json",                // --after value verbatim
+  "before_root": "D:\\server",           // input report's root; omitted when absent
+  "after_root": "D:\\server",            // input report's root; omitted when absent
   "before_mode": "convert",              // input report's mode; omitted when absent
   "after_mode": "convert",
   "summary": {
-    "added": 0, "removed": 0, "action_changed": 1, "unchanged": 1141
+    "added": 0, "removed": 0, "action_changed": 1, "unchanged": 1246
   },
   "added":   [],                         // paths only in the after report
   "removed": [],                         // paths only in the before report
   "changed": [                           // action OR byte-count drift
     {
-      "path": "D:\\server\\GameServer\\Channel.cpp",
-      "before": { "path": "...", "action": "converted", "bytes_before": 12873, "bytes_after": 15201 },
-      "after":  { "path": "...", "action": "unchanged",  "bytes_before": 15201, "bytes_after": 15201 }
+      "path": "GameServer/Channel.cpp",
+      "before": { "path": "...", "action": "unchanged",  "bytes_before": 15201, "bytes_after": 15201 },
+      "after":  { "path": "...", "action": "converted",  "bytes_before": 15201, "bytes_after": 16840 }
     }
   ]
 }
 ```
 
-Comparison is per exact path string; both inputs must come from the same root
-(differing `root` fields → stderr warning). Any report mode with `files[]` is a
-valid input; verify outcomes are not compared. Duplicate paths within one
-input resolve to the last occurrence.
+Inputs must be utf8-forge reports with a `files[]` array — anything else
+(wrong schema, bare array, malformed JSON) is a fatal exit 2. Record paths are
+compared relative to each report's `root`: the root prefix is stripped
+(separators normalized to `/`) before comparing, so identical trees scanned
+under different root directories no longer diff as full churn; paths in this
+document are therefore root-relative. Differing `root` fields still print a
+stderr warning; any report mode with `files[]` is a valid input; verify
+outcomes are not compared. Duplicate paths within one input resolve to the
+last occurrence.
 
-Field semantics map 1:1 to `DESIGN.md §9`.
+The field list above is normative for the diff document.

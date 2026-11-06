@@ -40,19 +40,24 @@ Playbook*.
 |-----------|-----------------------------------------------------------------|----------------------------------------|
 | `Utf8`    | No BOM + `str::from_utf8` OK                                    | Fast path; pure ASCII hits here        |
 | `Utf8Bom` | Starts with `EF BB BF`                                          | BOM stripped on decode                 |
-| `Utf32Le` | Starts with `FF FE 00 00` (checked **before** `FF FE`)          | Read-only: no UTF-32 write target      |
-| `Utf32Be` | Starts with `00 00 FE FF` (checked **before** the UTF-16 BOMs) | Same                                   |
-| `Utf16Le` | Starts with `FF FE`                                             | BOM stripped before decoding           |
+| `Utf32Be` | Starts with `00 00 FE FF` (checked right after the UTF-8 BOM)   | Read-only: no UTF-32 write target      |
+| `Utf32Le` | Starts with `FF FE 00 00` (`FF FE` prefix shared with UTF-16 LE; the next two bytes decide) | Same    |
+| `Utf16Le` | Starts with `FF FE` **not** followed by `00 00`                 | BOM stripped before decoding           |
 | `Utf16Be` | Starts with `FE FF`                                             | Same                                   |
 | `Gb18030` | UTF-8 strict fail → `GB18030.decode` with `had_errors == false` | Covers GB2312/GBK/GB18030              |
 | `Unknown` | All above fail                                                  | Reported & skipped — **never guessed** |
 
-**Detection order is frozen**: UTF-8 → GB18030, with the 4-byte UTF-32 BOMs
-checked before the 2-byte UTF-16 BOMs (WHATWG-style longest-prefix precedence).
-Reordering breaks idempotence on ASCII-only files. Documented ambiguity: a
-UTF-16LE file whose first character is U+0000 shares the UTF-32LE BOM bytes; it
-classifies as `utf-32le` and then fails strict UTF-32 decode loudly
-(`decode_error`) — never silent mojibake.
+**Detection order is frozen**: UTF-8 BOM → UTF-32 BE BOM (`00 00 FE FF`) →
+`FF FE` prefix (UTF-32 LE when followed by `00 00`, else UTF-16 LE) →
+UTF-16 BE → strict UTF-8 → strict GB18030 (WHATWG-style longest-prefix
+precedence). Reordering breaks idempotence on ASCII-only files. Consequence:
+a file starting `FF FE 00 00` is always decoded as UTF-32LE — a UTF-16LE
+encoding whose first character is U+0000 is genuinely indistinguishable there.
+If the payload is not also valid UTF-32, the strict UTF-32 decode fails loudly
+(`decode_error`, never silent mojibake); if it is, the file reads as UTF-32.
+That ambiguity is exactly why the UTF-16LE encoder refuses content that begins
+with U+0000 (§2.2): the output would start `FF FE 00 00` and could never be
+re-read as UTF-16.
 
 ### 2.2 Target Encodings
 
@@ -65,6 +70,15 @@ classifies as `utf-32le` and then fails strict UTF-32 decode loudly
 | `utf-16be`        | `[FE,FF] ++ utf16be_bytes(text)` — BOM **manual**   |
 
 where `utf16le_bytes` / `utf16be_bytes` are `str::encode_utf16()` serialized little-endian / big-endian.
+
+**UTF-16LE NUL guard**: `--target utf-16le` (tree and fetch modes) refuses to
+encode content whose first character is U+0000. The output would begin
+`FF FE 00 00`, byte-identical to the UTF-32LE BOM, so a second run would
+mis-read the file as UTF-32LE and corrupt it. The file is recorded as an
+`error` row with an `encode_error` reason (counted under the summary's
+`encode_errors` counter), exit 1; the original bytes are untouched.
+`--target utf-16be` is safe (`FE FF 00 00` re-reads as UTF-16BE) and
+unaffected.
 
 **No UTF-32 target**: UTF-32 is read-only (detection + strict decode). A
 UTF-32 value on `--target` is rejected by clap (exit 2); `verify` fails
@@ -88,19 +102,35 @@ Invalid UTF-16 surrogate pairs set `had_errors = true` → hard error, never a h
 
 ```rust
 pub fn detect(bytes: &[u8]) -> DetectedEncoding {
-    if bytes.is_empty() { return DetectedEncoding::Utf8; }
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { return DetectedEncoding::Utf8Bom; }
-    // 4-byte UTF-32 BOMs are checked before the 2-byte UTF-16 BOMs
-    // (WHATWG-style longest-prefix precedence).
-    if bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) { return DetectedEncoding::Utf32Le; }
-    // The UTF-32BE BOM is `00 00 FE FF` (checked first, WHATWG-style); a
-    // payload starting `FE FF 00 00` is UTF-16BE with a leading NUL char.
-    if bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) { return DetectedEncoding::Utf32Be; }
-    if bytes.starts_with(&[0xFF, 0xFE]) { return DetectedEncoding::Utf16Le; }
-    if bytes.starts_with(&[0xFE, 0xFF]) { return DetectedEncoding::Utf16Be; }
-    if std::str::from_utf8(bytes).is_ok() { return DetectedEncoding::Utf8; }
+    if bytes.is_empty() {
+        return DetectedEncoding::Utf8;
+    }
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return DetectedEncoding::Utf8Bom;
+    }
+    // WHATWG BOM sniffing: the 4-byte UTF-32 patterns are checked before the
+    // 2-byte UTF-16 patterns. The UTF-32BE BOM is `00 00 FE FF`; a payload
+    // starting `FE FF 00 00` is a UTF-16BE file whose first character is
+    // U+0000 — UTF-16BE, not UTF-32BE.
+    if bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+        return DetectedEncoding::Utf32Be;
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        if bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+            return DetectedEncoding::Utf32Le;
+        }
+        return DetectedEncoding::Utf16Le;
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return DetectedEncoding::Utf16Be;
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        return DetectedEncoding::Utf8;
+    }
     let (_, _, had_errors) = GB18030.decode(bytes);
-    if !had_errors { return DetectedEncoding::Gb18030; }
+    if !had_errors {
+        return DetectedEncoding::Gb18030;
+    }
     DetectedEncoding::Unknown
 }
 ```
@@ -152,6 +182,10 @@ fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
         TargetEncoding::Utf16Le => {
             // encoding_rs' generic encode() would map this target back to
             // UTF-8; serialize `str::encode_utf16()` little-endian instead.
+            // NUL guard: the caller (transcode) refuses content whose first
+            // character is U+0000 — the output would start `FF FE 00 00`,
+            // byte-identical to the UTF-32LE BOM, and would be mis-read as
+            // UTF-32LE on the next run (`encode_error`, exit 1).
             let mut v = Vec::with_capacity(2 + text.len() * 2);
             v.extend_from_slice(&[0xFF, 0xFE]);
             for unit in text.encode_utf16() {
@@ -268,7 +302,7 @@ gates: `!` negation lifts only the ignore layer, never the whitelist /
 ### 5.5 Config File
 
 `--config <PATH>` loads defaults from a TOML document
-(`src/config.rs`, `toml 0.9` parse+serde):
+(`src/config.rs`, `toml 1.2` parse+serde):
 
 ```toml
 [filter]
@@ -296,7 +330,8 @@ threads       = 8
   whitelist stays auditable.
 - Unknown keys, malformed TOML, and wrong types are **fatal exit 2**; messages
   carry the TOML line/column.
-- Fetch mode ignores `--config`. Deliberately absent from the schema: `root`,
+- Fetch mode reads no config: `--config` combined with `--url` is a fatal
+  exit 2. Deliberately absent from the schema: `root`,
   `report`, `dry_run`, `url`, `output`, `quiet`, `verbose`, `ignore_file` —
   options that select what gets written where or flip write behavior stay
   visible on the command line.
@@ -450,7 +485,7 @@ fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
 
 fn derive_output_path(url: &str) -> PathBuf {
     let segment = reqwest::Url::parse(url).ok().and_then(|u| {
-        u.path_segments()?.next_back().map(str::to_owned).filter(|s| !s.is_empty())
+        u.path_segments()?.rev().find(|s| !s.is_empty()).map(str::to_owned)
     });
     match segment {
         Some(seg) if has_extension(&seg) => PathBuf::from(seg),
@@ -478,12 +513,13 @@ COMMANDS:
   fix        Detect + transcode + verify in one pass (exit 3 when the gate fails)
   diff       Compare two utf8-forge JSON reports per path (any mode with files[])
 
-GLOBAL OPTIONS:
+SHARED TREE OPTIONS (accepted by scan / verify / convert / fix after the subcommand):
   -r, --root <PATH>            Root directory (default .)
   -e, --ext <LIST>             Override default extension whitelist
+                               (an empty normalized list is fatal, exit 2)
   -x, --exclude <LIST>         Extra excluded directories
   -X, --exclude-ext <LIST>     Extra excluded extensions
-      --exclude-glob <GLOB>    Extra directory glob exclusion
+      --exclude-glob <GLOB>    Extra glob exclusion over root-relative paths (dirs and files)
       --include-rc             Include .rc/.rc2/.dlg
       --include-msbuild        Include .sln/.vcxproj/...
       --include-hidden         Process dot-prefixed files/dirs
@@ -492,19 +528,21 @@ GLOBAL OPTIONS:
                                replaces auto-discovery of <root>/.utf8forgeignore)
       --no-ignore-file         Disable ignore-file handling entirely
       --max-file-size <BYTES>  Skip files above this size (default 200 MiB)
-      --threads <N>            Rayon thread count
+      --threads <N>            Rayon thread count (values below 1 clamp to 1)
       --report <PATH>          Write JSON report
   -q, --quiet                  Errors only
   -v, --verbose                Per-file detail
 
 CONVERT / FIX ONLY:
   -t, --target <ENC>           utf-8 | utf-8-bom | gb18030 | utf-16le | utf-16be
+                               (convert; fix accepts only the default utf-8)
       --dry-run                No writes; report only
       --backup-dir <PATH>      Backup original bytes before overwrite
 
 REMOTE DOWNLOAD (convert only):
       --url <URL>              Fetch remote file and transcode
-      --output <PATH>          Destination for --url (derived if omitted)
+      --output <PATH>          Destination for --url (derived if omitted;
+                               requires --url)
 
 DIFF ONLY:
       --before <REPORT>        The earlier report
@@ -512,9 +550,11 @@ DIFF ONLY:
       --report <PATH>          Write the diff JSON here; otherwise stdout
       --fail-on-change         Exit 1 when the diff is non-empty
 
-# --target / --dry-run / --backup-dir exist on convert and fix: scan and
-# verify reject them with a clap error (exit 2). --url / --output are
-# convert-only; fix has no remote-fetch surface.
+# --target / --dry-run / --backup-dir exist on convert and fix (fix accepts
+# only --target utf-8, fatal exit 2 otherwise): scan and verify reject them
+# with a clap error (exit 2). --url / --output are convert-only; --output
+# requires --url and --config cannot be combined with --url (both fatal,
+# exit 2). fix has no remote-fetch surface.
 
 EXAMPLES:
   utf8-forge scan    --root D:\server --report scan.json
@@ -524,6 +564,9 @@ EXAMPLES:
   utf8-forge diff    --before apply.json --after apply2.json --fail-on-change
 ```
 
+Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
+`<EXCLUDE_EXT>`); this section uses descriptive names for the same values.
+
 ---
 
 ## 10. Dependencies (Latest as of 2026-11)
@@ -531,7 +574,7 @@ EXAMPLES:
 ```toml
 [package]
 name = "utf8-forge"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 
 [[bin]]
@@ -550,7 +593,7 @@ rayon = "1.12.0"           # latest
 reqwest = { version = "0.13.5", features = ["blocking"], optional = true }  # latest stable; 0.13.0-rc.1 available if RC is desired
 serde = { version = "1.0.229", features = ["derive"] }  # latest
 serde_json = "1.0.154"          # latest
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }  # config file (§5.5)
+toml = { version = "1.2", default-features = false, features = ["parse", "serde"] }  # config file (§5.5)
 walkdir = "2.5.0"            # latest
 
 [dev-dependencies]
@@ -606,6 +649,7 @@ utf8-forge/
 ├── AGENT.md
 ├── EXECUTION.md
 ├── DESIGN.md
+├── ROADMAP.md
 ├── docs/
 │   ├── USAGE.md       # English usage guide
 │   └── USAGE.zh-CN.md # Chinese usage guide
@@ -629,7 +673,8 @@ utf8-forge/
     ├── transcode.rs
     ├── filter.rs
     ├── fetch.rs
-    └── end_to_end.rs
+    ├── end_to_end.rs
+    └── remote_off.rs
 ```
 
 **English comment policy**: Every public function, module, and non-trivial code block carries a `///` or `//` comment in
