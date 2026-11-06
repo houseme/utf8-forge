@@ -23,42 +23,50 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::ForgeError;
 
-/// Monotonic-enough uniqueness source for temp names (pid + wall nanos).
+/// Temp-name suffix with a process-local sequence independent of clock resolution.
 /// Shared with the fetcher's streaming temp files.
 pub(crate) fn unique_suffix() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{}-{}", process::id(), nanos)
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{sequence}", process::id())
 }
 
 /// Atomically replace `path` with `bytes`.
 ///
 /// The temp file is created in the destination's parent directory (same
-/// volume, so rename is atomic), fsynced, given the original's permissions,
+/// volume, so rename is atomic), given the original's permissions, fsynced,
 /// then renamed over the destination. Temp leftovers are cleaned up on error.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ForgeError> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output".to_string());
-    let tmp = parent.join(format!(".utf8-forge-tmp-{}-{}", unique_suffix(), file_name));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // Keep the temp basename short even when the destination approaches the
+    // filesystem's name limit. Exclusive creation also refuses collisions
+    // and symlinks; cleanup starts only after this process owns the temp.
+    let tmp = parent.join(format!(".utf8-forge-tmp-{}", unique_suffix()));
+    let mut f = fs::File::create_new(&tmp)?;
 
     let write_result = (|| -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
+        // Preserve permissions before syncing, and fail without replacing
+        // the original if its permissions cannot be copied.
+        match fs::metadata(path) {
+            Ok(meta) => f.set_permissions(meta.permissions())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         f.sync_all()?;
         drop(f);
-        // Preserve the original file's permissions when replacing it.
-        if let Ok(meta) = fs::metadata(path) {
-            let _ = fs::set_permissions(&tmp, meta.permissions());
-        }
         fs::rename(&tmp, path)?;
         // Best-effort directory fsync: without it a machine crash right after
         // the rename can lose the rename itself. Ignored where the platform
@@ -142,6 +150,40 @@ mod tests {
         let p2 = dir.path().join("c.txt");
         atomic_write(&p2, b"x").unwrap();
         assert_eq!(fs::read(&p2).unwrap(), b"x");
+    }
+
+    #[test]
+    fn failed_rename_cleans_up_temp_and_keeps_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("occupied");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("original"), b"old").unwrap();
+
+        assert!(atomic_write(&destination, b"replacement").is_err());
+        assert_eq!(fs::read(destination.join("original")).unwrap(), b"old");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_writes_produce_complete_content_without_temp_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.cpp");
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16u8)
+                .map(|value| {
+                    let path = &path;
+                    scope.spawn(move || atomic_write(path, &vec![value; 4096]))
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+        });
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 4096);
+        assert!(bytes[0] < 16);
+        assert!(bytes.iter().all(|byte| *byte == bytes[0]));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

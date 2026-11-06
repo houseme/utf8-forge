@@ -1177,3 +1177,148 @@ fn unreadable_auto_ignore_file_warns_and_continues() {
         let _ = fs::set_permissions(&ignore, fs::Permissions::from_mode(0o644));
     }
 }
+
+/// A valid source basename must also work for backups and atomic replacement.
+#[cfg(unix)]
+#[test]
+fn convert_long_filename_preserves_backup_and_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    let backup = dir.path().join("backup");
+    let name = format!("{}.cpp", "a".repeat(236));
+    put(&root, &name, GBK);
+    let path = root.join(&name);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+    let a = args(&root, None);
+    assert_eq!(run_tree(Commands::Scan, &a), 0);
+    assert_eq!(run_convert(&a, |c| c.dry_run = true), 0);
+    assert_eq!(fs::read(&path).unwrap(), GBK);
+    assert_eq!(run_convert(&a, |c| c.backup_dir = Some(backup.clone())), 0);
+    assert_eq!(fs::read(&path).unwrap(), UTF8);
+    assert_eq!(fs::read(backup.join(&name)).unwrap(), GBK);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(run_tree(Commands::Verify, &a), 0);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(run_convert(&a, |_| {}), 0);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+}
+
+/// Auto-discovery warnings must be visible in verify as well as scan.
+#[test]
+fn verify_reports_invalid_auto_ignore_file_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.cpp", b"ascii");
+    put(dir.path(), ".utf8forgeignore", b"!\n");
+
+    for quiet in [false, true] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"));
+        command.arg("verify").arg("--root").arg(dir.path());
+        if quiet {
+            command.arg("--quiet");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if quiet {
+            assert!(stderr.is_empty(), "{stderr}");
+        } else {
+            assert!(
+                stderr.contains("warning: ignoring unreadable .utf8forgeignore"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("line 1"), "{stderr}");
+        }
+    }
+}
+
+/// Size limits apply consistently at each public per-file entry point.
+#[test]
+fn per_file_size_limits_preserve_oversized_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.cpp");
+    fs::write(&path, GBK).unwrap();
+    let mut ctx = utf8_forge::ConvertCtx {
+        root: dir.path().to_path_buf(),
+        target: TargetEncoding::Utf8,
+        dry_run: false,
+        backup_dir: Some(dir.path().join("backup")),
+        max_file_size: 3,
+    };
+    assert_eq!(utf8_forge::scan_file(&path, 3).action, "skipped_too_large");
+    assert_eq!(
+        utf8_forge::convert_file(&path, &ctx).action,
+        "skipped_too_large"
+    );
+    let record = utf8_forge::verify_file(&path, 3);
+    assert_eq!(record.action, "failed");
+    assert!(record.error.unwrap().starts_with("too_large"));
+    assert_eq!(fs::read(&path).unwrap(), GBK);
+    assert!(!ctx.backup_dir.as_ref().unwrap().exists());
+
+    ctx.max_file_size = GBK.len() as u64;
+    assert_eq!(
+        utf8_forge::scan_file(&path, ctx.max_file_size).detected,
+        Some("gb18030")
+    );
+    assert_eq!(utf8_forge::convert_file(&path, &ctx).action, "converted");
+    assert_eq!(fs::read(&path).unwrap(), UTF8);
+    assert_eq!(
+        utf8_forge::verify_file(&path, UTF8.len() as u64).action,
+        "passed"
+    );
+}
+
+/// Conversion and fix share config precedence across all config sections.
+#[test]
+fn convert_and_fix_merge_config_with_cli_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    let backup = dir.path().join("backup");
+    let override_backup = dir.path().join("override-backup");
+    put(&root, "a.h", GBK);
+    put(&root, "b.cpp", GBK);
+    let config = dir.path().join("forge.toml");
+    fs::write(&config, format!(
+        "[filter]\nextensions = [\"h\"]\n[convert]\ntarget = \"utf-8-bom\"\nbackup_dir = {}\n[options]\nmax_file_size = 1024\nthreads = 1\n",
+        serde_json::to_string(&backup).unwrap()
+    )).unwrap();
+    let report = dir.path().join("report.json");
+    let mut a = args(&root, Some(&report));
+    a.config = Some(config);
+
+    // These helpers use an explicit UTF-8 target by default. None models
+    // the CLI invocation with --target omitted, allowing config to apply.
+    assert_eq!(
+        run_convert(&a, |c| {
+            c.target = None;
+            c.dry_run = true;
+        }),
+        0
+    );
+    assert!(!backup.exists());
+    assert_eq!(run_convert(&a, |c| c.target = None), 0);
+    let bom_utf8 = [b"\xEF\xBB\xBF".as_slice(), UTF8].concat();
+    assert_eq!(fs::read(root.join("a.h")).unwrap(), bom_utf8);
+    assert_eq!(fs::read(root.join("b.cpp")).unwrap(), GBK);
+    assert_eq!(fs::read(backup.join("a.h")).unwrap(), GBK);
+    assert_eq!(read_report(&report)["options"]["target"], "utf-8-bom");
+
+    assert_eq!(run_fix(&a, |c| c.target = None), 2);
+    assert_eq!(
+        run_fix(&a, |c| {
+            c.target = Some(TargetEncoding::Utf8);
+            c.backup_dir = Some(override_backup.clone());
+        }),
+        0
+    );
+    assert_eq!(fs::read(root.join("a.h")).unwrap(), UTF8);
+    assert_eq!(fs::read(override_backup.join("a.h")).unwrap(), bom_utf8);
+    assert_eq!(fs::read(backup.join("a.h")).unwrap(), GBK);
+    assert_eq!(read_report(&report)["options"]["target"], "utf-8");
+}

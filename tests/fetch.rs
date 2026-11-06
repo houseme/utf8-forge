@@ -407,3 +407,35 @@ fn fetch_report_preflight_runs_before_download() {
     assert_eq!(run(Commands::Convert(args).into()), 2);
     assert!(!out.exists(), "the pre-flight must abort before any output");
 }
+
+/// A bounded destination comparison must distinguish equal prefixes from
+/// equal files, including the dry-run path.
+#[test]
+fn fetch_replaces_longer_destination_with_matching_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.cpp");
+    let report = dir.path().join("report.json");
+    let original = [UTF8_NIHAO, b"extra bytes"].concat();
+    fs::write(&out, &original).unwrap();
+
+    for dry_run in [true, false] {
+        let (url, server) = serve_once(Response {
+            status: 200,
+            content_length: Some(GBK_NIHAO.len()),
+            body: GBK_NIHAO.to_vec(),
+            close_without_length: false,
+        });
+        let mut args = convert_url_args(url, out.clone(), report.clone(), 1024);
+        args.dry_run = dry_run;
+        assert_eq!(run(Commands::Convert(args).into()), 0);
+        server.join().unwrap();
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+        if dry_run {
+            assert_eq!(fs::read(&out).unwrap(), original);
+            assert_eq!(doc["files"][0]["action"], "would_convert");
+        } else {
+            assert_eq!(fs::read(&out).unwrap(), UTF8_NIHAO);
+            assert_eq!(doc["files"][0]["action"], "converted");
+        }
+    }
+}

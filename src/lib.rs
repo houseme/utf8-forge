@@ -41,6 +41,7 @@ pub mod walker;
 pub mod writer;
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -78,6 +79,17 @@ pub fn run(cli: Cli) -> i32 {
 // ---------------------------------------------------------------------------
 // Per-file processors
 // ---------------------------------------------------------------------------
+
+/// Read at most one byte beyond the cap so callers can distinguish an exact
+/// fit from oversized content even when the file grows after the metadata
+/// check. The extra byte is only used for the size verdict, never transcoded.
+fn read_file_limited(path: &Path, max_file_size: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(max_file_size.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
 
 /// Deferred `FileRecord` builder that stamps per-file duration at completion.
 struct RecBuilder<'a> {
@@ -122,7 +134,7 @@ pub fn scan_file(path: &Path, max_file_size: u64) -> FileRecord {
     {
         return b.done(None, "skipped_too_large", Some(sz), None, None);
     }
-    let bytes = match fs::read(path) {
+    let bytes = match read_file_limited(path, max_file_size) {
         Ok(bytes) => bytes,
         Err(e) => return b.done(None, "error", size, None, Some(format!("io_error: {e}"))),
     };
@@ -157,7 +169,7 @@ pub fn convert_file(path: &Path, ctx: &ConvertCtx) -> FileRecord {
     {
         return b.done(None, "skipped_too_large", Some(sz), None, None);
     }
-    let bytes = match fs::read(path) {
+    let bytes = match read_file_limited(path, ctx.max_file_size) {
         Ok(bytes) => bytes,
         Err(e) => return b.done(None, "error", size, None, Some(format!("io_error: {e}"))),
     };
@@ -258,7 +270,7 @@ pub fn verify_file(path: &Path, max_file_size: u64) -> FileRecord {
             Some("too_large: exceeds --max-file-size".to_string()),
         );
     }
-    let bytes = match fs::read(path) {
+    let bytes = match read_file_limited(path, max_file_size) {
         Ok(bytes) => bytes,
         Err(e) => return b.done(None, "failed", size, None, Some(format!("io_error: {e}"))),
     };
@@ -619,10 +631,12 @@ fn build_filter(args: &TreeArgs) -> anyhow::Result<FilterConfig> {
 /// into the shared tree args. CLI flags win over config values; lists replace
 /// across layers (never concatenate) so the effective whitelist stays
 /// auditable. Runs before any pre-flight so downstream `ensure_*` checks see
-/// resolved values.
-fn merge_tree_config(common: &mut TreeArgs) -> anyhow::Result<Option<String>> {
+/// resolved values. Returns the parsed config for conversion-option merging.
+fn merge_tree_config(
+    common: &mut TreeArgs,
+) -> anyhow::Result<(Option<String>, crate::config::ForgeConfig)> {
     let Some(path) = common.config.clone() else {
-        return Ok(None);
+        return Ok((None, crate::config::ForgeConfig::default()));
     };
     let cfg = crate::config::load(&path)?;
     if common.ext.is_empty() {
@@ -650,7 +664,7 @@ fn merge_tree_config(common: &mut TreeArgs) -> anyhow::Result<Option<String>> {
     // an invalid value is always a loud, key-naming error instead of being
     // silently dropped by scan/verify.
     cfg.target()?;
-    Ok(Some(path.to_string_lossy().into_owned()))
+    Ok((Some(path.to_string_lossy().into_owned()), cfg))
 }
 
 /// Conversion-option surface shared by `convert` and `fix`, so the
@@ -721,53 +735,21 @@ impl ConvertOptions for FixArgs {
 }
 
 /// Apply the tree merge plus the `[convert]` section (convert / fix).
-/// CLI flags win over config values; runs before any pre-flight. The parsed
-/// config is returned so callers can consult sections without re-reading the
-/// file.
-fn merge_convert_config<C: ConvertOptions + ConvertPeek>(
-    conv: &mut C,
-) -> anyhow::Result<(Option<String>, crate::config::ForgeConfig)> {
-    let recorded = merge_tree_config(conv.common_mut())?;
-    let Some(path) = conv.common_mut().config.clone() else {
-        return Ok((recorded, crate::config::ForgeConfig::default()));
-    };
-    let cfg = crate::config::load(&path)?;
-    if conv.target_is_none()
+/// CLI flags win over config values; runs before any pre-flight. Both
+/// sections use the same parsed snapshot of the file.
+fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<Option<String>> {
+    let (recorded, cfg) = merge_tree_config(conv.common_mut())?;
+    if conv.target().is_none()
         && let Some(t) = cfg.target()?
     {
         conv.set_target(Some(t));
     }
-    if conv.backup_is_none()
+    if conv.backup_dir().is_none()
         && let Some(dir) = &cfg.convert.backup_dir
     {
         conv.set_backup_dir(Some(std::path::PathBuf::from(dir)));
     }
-    Ok((recorded, cfg))
-}
-
-// The peek helpers are dispatched through the same trait to avoid leaking
-// per-struct fields here.
-trait ConvertPeek {
-    fn target_is_none(&self) -> bool;
-    fn backup_is_none(&self) -> bool;
-}
-
-impl ConvertPeek for ConvertArgs {
-    fn target_is_none(&self) -> bool {
-        self.target.is_none()
-    }
-    fn backup_is_none(&self) -> bool {
-        self.backup_dir.is_none()
-    }
-}
-
-impl ConvertPeek for FixArgs {
-    fn target_is_none(&self) -> bool {
-        self.target.is_none()
-    }
-    fn backup_is_none(&self) -> bool {
-        self.backup_dir.is_none()
-    }
+    Ok(recorded)
 }
 
 /// Root must be an existing directory, else exit code 2.
@@ -986,7 +968,7 @@ fn print_warnings(warnings: &[String], console: ConsoleCfg) {
 /// errored (I/O), matching the documented per-file issue contract.
 fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_tree_config(&mut args)?;
+    let (config_file, _) = merge_tree_config(&mut args)?;
     ensure_root(&args.root)?;
     let filter = build_filter(&args)?;
     if let Some(path) = &args.report {
@@ -1077,7 +1059,7 @@ fn cmd_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
 /// per-file issue (`unknown` / decode / io) remains.
 fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let (config_file, _cfg) = merge_convert_config(&mut args)?;
+    let config_file = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
     ensure_root(&common.root)?;
@@ -1176,7 +1158,7 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
 /// Exit 0 on success, 3 on any failure.
 fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_tree_config(&mut args)?;
+    let (config_file, _) = merge_tree_config(&mut args)?;
     ensure_root(&args.root)?;
     let filter = build_filter(&args)?;
     if let Some(path) = &args.report {
@@ -1199,7 +1181,8 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
         warnings.extend(ignore_warnings);
         walk
     };
-    print_warnings(&walk.warnings, console);
+    warnings.extend(walk.warnings);
+    print_warnings(&warnings, console);
     let started_at = wall_now();
     let started = Instant::now();
     let records = with_pool(args.threads, || {
@@ -1330,7 +1313,9 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
                     };
                     // Destination already holds the identical bytes → same
                     // no-churn contract as tree mode: `unchanged`, no write.
-                    if fs::read(&out_path).is_ok_and(|existing| existing == new_bytes) {
+                    if read_file_limited(&out_path, new_bytes.len() as u64)
+                        .is_ok_and(|existing| existing == new_bytes)
+                    {
                         RecBuilder::new(&out_path).done(
                             Some(tag),
                             "unchanged",
@@ -1443,7 +1428,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
 /// runs read-only, so the preview reports the tree's current end state.
 fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let (config_file, _cfg) = merge_convert_config(&mut args)?;
+    let config_file = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
     // The verify gate asserts UTF-8 without BOM no matter what the convert
@@ -1666,6 +1651,41 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     } else {
         0
     })
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::read_file_limited;
+    use std::fs;
+
+    #[test]
+    fn reads_only_cap_plus_one_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.cpp");
+        // Exercise the read independently of the stat pre-check, as when a
+        // file grows between the pre-check and opening it.
+        fs::write(&path, vec![b'x'; 65536]).unwrap();
+        let bytes = read_file_limited(&path, 4096).unwrap();
+        assert_eq!(bytes, vec![b'x'; 4097]);
+        assert_eq!(read_file_limited(&path, 0).unwrap(), b"x");
+    }
+
+    #[test]
+    fn handles_exact_limit_empty_files_and_unlimited_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.cpp");
+        fs::write(&path, b"abc").unwrap();
+        assert_eq!(read_file_limited(&path, 3).unwrap(), b"abc");
+        assert_eq!(read_file_limited(&path, u64::MAX).unwrap(), b"abc");
+        fs::write(&path, b"").unwrap();
+        assert!(read_file_limited(&path, 0).unwrap().is_empty());
+        assert_eq!(
+            read_file_limited(&dir.path().join("missing.cpp"), 3)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 }
 
 #[cfg(test)]

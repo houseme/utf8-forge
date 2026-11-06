@@ -271,6 +271,10 @@ const DEFAULT_EXCLUDE_PREFIXES: &[&str] = &[
 - Symlinks: `follow_links(false)` — walker prunes automatically.
 - Extension matching: `to_ascii_lowercase()`.
 - `--max-file-size` (default 200 MiB) → recorded as `too_large`.
+- Local reads stop after the limit plus one byte, allowing growth after the
+  metadata check to be detected with bounded input buffering. The extra byte
+  is used only to reject oversized input. For a growing file, the recorded
+  size can therefore be a lower bound on its final size.
 - Hidden files (`.`-prefixed) skipped unless `--include-hidden`.
 
 ### 5.4 Ignore Files
@@ -368,22 +372,19 @@ overrides via `ThreadPoolBuilder`.
 
 ## 7. Atomic Writes
 
-```rust
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let tmp = unique_tmp_path(parent, path);
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if let Ok(meta) = fs::metadata(path) {
-        let _ = fs::set_permissions(&tmp, meta.permissions());
-    }
-    fs::rename(&tmp, path)?; // atomic on same volume
-    Ok(())
-}
-```
+`writer::atomic_write` performs the following steps.
+
+1. Exclusively create a short temporary filename in the destination directory
+   with `File::create_new`. Its suffix combines the process ID, timestamp and
+   atomic sequence counter, supporting concurrent writers and long destination
+   basenames.
+2. Write the complete content and copy the destination's permissions when it
+   exists. Permission-copy failures abort the replacement.
+3. Sync and close the temporary file, then rename it over the destination on
+   the same volume.
+4. Attempt to sync the parent directory, using `.` for bare filenames.
+5. On failure, attempt to remove the temporary file after closing its handle.
+   Cleanup applies only to a temporary file successfully created by this call.
 
 **Never truncate-then-write**: a crash mid-write destroys source code. Temp file + rename guarantees either old or new
 content, never neither.
