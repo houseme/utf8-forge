@@ -242,10 +242,32 @@ fn star_run_collapse_is_semantically_equivalent() {
 
 #[test]
 fn pathological_star_pattern_terminates_instantly() {
-    // Before the step budget this ran for minutes (exponential backtracking).
+    // Repeated stars must terminate without exponential backtracking.
     let g = Glob::compile("************zzzzzzz").unwrap();
     let name: String = "a".repeat(40);
     assert!(!g.matches(&[name.as_str()]));
+}
+
+#[test]
+fn complex_glob_excludes_files_through_both_filter_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = "a".repeat(40);
+    let protected = format!("{directory}/aaaaaaaab.cpp");
+    put(dir.path(), &protected, b"must-not-touch");
+    put(dir.path(), "keep.cpp", b"keep");
+    let pattern = format!("**/{}b.cpp", "*a".repeat(8));
+
+    let opts = FilterOptions {
+        exclude_globs: vec![pattern.clone()],
+        ..Default::default()
+    };
+    assert_eq!(walk(dir.path(), &opts), vec!["keep.cpp"]);
+
+    let config = FilterConfig::build(&FilterOptions::default()).unwrap();
+    let ignore = utf8_forge::ignorefile::IgnoreFile::parse(&pattern).unwrap();
+    let result = collect_files(dir.path(), &config, &[], Some(&ignore));
+    assert!(result.warnings.is_empty());
+    assert_eq!(result.files, vec![dir.path().join("keep.cpp")]);
 }
 
 #[test]

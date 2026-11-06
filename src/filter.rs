@@ -261,18 +261,13 @@ pub fn extension_of(path: &Path) -> Option<String> {
 /// case-insensitive (consistent with directory exclusion on Windows).
 ///
 /// Star runs are collapsed at compile time (`***` → `**`, `a**b` → `a*b`) —
-/// semantically identical since consecutive stars match the same text — and
-/// the matchers run under a step budget so a star-heavy pattern can never
-/// backtrack exponentially (budget exhausted → no match).
+/// semantically identical since consecutive stars match the same text.
+/// Iterative matchers retry only the latest wildcard, giving polynomial
+/// worst-case work without recursion or a budget that can discard matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
     parts: Vec<String>,
 }
-
-/// Upper bound on matcher steps per `matches()` call. Generous for any
-/// realistic path/pattern, tiny enough to make pathological backtracking
-/// (which previously hung for minutes) return instantly.
-const GLOB_STEP_BUDGET: u64 = 1_000_000;
 
 impl Glob {
     /// Compile `pattern`. Empty patterns are rejected. Backslashes are
@@ -309,8 +304,7 @@ impl Glob {
     pub fn matches(&self, components: &[&str]) -> bool {
         let lowered: Vec<String> = components.iter().map(|c| c.to_ascii_lowercase()).collect();
         let refs: Vec<&str> = lowered.iter().map(String::as_str).collect();
-        let mut budget = GLOB_STEP_BUDGET;
-        match_parts(&self.parts, &refs, &mut budget)
+        match_parts(&self.parts, &refs)
     }
 }
 
@@ -336,51 +330,61 @@ fn collapse_stars(component: &str) -> String {
     out
 }
 
-/// Recursive component matcher; `**` consumes zero or more components.
-/// `budget` shrinks on every recursive call; exhaustion returns "no match".
-fn match_parts(pat: &[String], path: &[&str], budget: &mut u64) -> bool {
-    if *budget == 0 {
-        return false;
-    }
-    *budget -= 1;
-    match pat.first() {
-        None => path.is_empty(),
-        Some(first) if first == "**" => {
-            for i in 0..=path.len() {
-                if match_parts(&pat[1..], &path[i..], budget) {
-                    return true;
-                }
-            }
-            false
+/// Match path components, letting the latest `**` consume another component
+/// on a mismatch. Earlier wildcards need no retry once a later one is reached.
+/// There are at most O(pattern components * path components) comparisons.
+fn match_parts(pattern: &[String], path: &[&str]) -> bool {
+    let mut pattern_index = 0;
+    let mut path_index = 0;
+    let mut last_star = None;
+
+    while path_index < path.len() {
+        let part = pattern.get(pattern_index);
+        if part.is_some_and(|part| part == "**") {
+            last_star = Some((pattern_index, path_index));
+            pattern_index += 1;
+        } else if part.is_some_and(|part| match_component(part, path[path_index])) {
+            pattern_index += 1;
+            path_index += 1;
+        } else if let Some((star_index, matched_until)) = &mut last_star {
+            *matched_until += 1;
+            path_index = *matched_until;
+            pattern_index = *star_index + 1;
+        } else {
+            return false;
         }
-        Some(first) => match path.first() {
-            None => false,
-            Some(head) => {
-                match_component(first.as_str(), head, budget)
-                    && match_parts(&pat[1..], &path[1..], budget)
-            }
-        },
     }
+
+    pattern[pattern_index..].iter().all(|part| part == "**")
 }
 
-/// Wildcard matcher inside a single path component (`*`, `?`).
-fn match_component(pat: &str, s: &str, budget: &mut u64) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    let t: Vec<char> = s.chars().collect();
-    match_chars(&p, &t, budget)
-}
+/// Match `*` and `?` within one component using Unicode scalar values.
+/// Retrying only the latest `*` bounds work by O(pattern chars * text chars).
+fn match_component(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut last_star = None;
 
-fn match_chars(pat: &[char], text: &[char], budget: &mut u64) -> bool {
-    if *budget == 0 {
-        return false;
+    while text_index < text.len() {
+        let token = pattern.get(pattern_index);
+        if token == Some(&'*') {
+            last_star = Some((pattern_index, text_index));
+            pattern_index += 1;
+        } else if token.is_some_and(|&token| token == '?' || token == text[text_index]) {
+            pattern_index += 1;
+            text_index += 1;
+        } else if let Some((star_index, matched_until)) = &mut last_star {
+            *matched_until += 1;
+            text_index = *matched_until;
+            pattern_index = *star_index + 1;
+        } else {
+            return false;
+        }
     }
-    *budget -= 1;
-    match pat.first() {
-        None => text.is_empty(),
-        Some('*') => (0..=text.len()).any(|i| match_chars(&pat[1..], &text[i..], budget)),
-        Some('?') => !text.is_empty() && match_chars(&pat[1..], &text[1..], budget),
-        Some(c) => !text.is_empty() && text[0] == *c && match_chars(&pat[1..], &text[1..], budget),
-    }
+
+    pattern[pattern_index..].iter().all(|&token| token == '*')
 }
 
 #[cfg(test)]
@@ -416,6 +420,120 @@ mod tests {
     fn glob_empty_pattern_rejected() {
         assert!(Glob::compile("").is_err());
         assert!(Glob::compile("///").is_err());
+    }
+
+    #[test]
+    fn glob_retries_after_expensive_nonmatching_component() {
+        let pattern = format!("**/{}b.cpp", "*a".repeat(8));
+        let directory = "a".repeat(40);
+        let glob = Glob::compile(&pattern).unwrap();
+        // A shared recursion budget used to expire on the directory before
+        // the matcher could reach the matching filename.
+        assert!(glob.matches(&[&directory, "aaaaaaaab.cpp"]));
+        assert!(!glob.matches(&[&directory, "aaaaaaaac.cpp"]));
+    }
+
+    #[test]
+    fn glob_handles_long_literals_and_deep_paths_without_recursion() {
+        let literal = "a".repeat(20_000);
+        assert!(Glob::compile(&literal).unwrap().matches(&[&literal]));
+        let components = vec!["a"; 10_000];
+        let pattern = components.join("/");
+        assert!(Glob::compile(&pattern).unwrap().matches(&components));
+    }
+
+    #[test]
+    fn glob_preserves_unicode_and_raw_backslash_semantics() {
+        let glob = Glob::compile("**/?文*.CPP").unwrap();
+        assert!(glob.matches(&["目录", "中文本.cpp"]));
+        assert!(!glob.matches(&["目录", "文.cpp"]));
+        assert!(Glob::compile_raw("a\\?文").unwrap().matches(&["A\\中文"]));
+        assert!(!Glob::compile_raw("a\\?文").unwrap().matches(&["a", "中文"]));
+    }
+
+    /// Enumerate small finite input spaces for the recursive test oracle.
+    fn short_sequences<T: Clone>(alphabet: &[T], max_len: usize) -> Vec<Vec<T>> {
+        let mut all = vec![Vec::new()];
+        let mut level = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in &level {
+                for token in alphabet {
+                    let mut sequence = prefix.clone();
+                    sequence.push(token.clone());
+                    next.push(sequence);
+                }
+            }
+            all.extend(next.iter().cloned());
+            level = next;
+        }
+        all
+    }
+
+    /// Exhaustive wildcard expansion is deliberately limited to tiny tests.
+    fn reference_chars(pattern: &[char], text: &[char]) -> bool {
+        match pattern.first() {
+            None => text.is_empty(),
+            Some('*') => {
+                (0..=text.len()).any(|length| reference_chars(&pattern[1..], &text[length..]))
+            }
+            Some(token) => {
+                text.first()
+                    .is_some_and(|first| *token == '?' || token == first)
+                    && reference_chars(&pattern[1..], &text[1..])
+            }
+        }
+    }
+
+    /// Independent component recursion used only for short generated paths.
+    fn reference_parts(pattern: &[&str], path: &[&str]) -> bool {
+        match pattern.first() {
+            None => path.is_empty(),
+            Some(&"**") => {
+                (0..=path.len()).any(|length| reference_parts(&pattern[1..], &path[length..]))
+            }
+            Some(part) => {
+                path.first().is_some_and(|component| {
+                    reference_chars(
+                        &part.chars().collect::<Vec<_>>(),
+                        &component.chars().collect::<Vec<_>>(),
+                    )
+                }) && reference_parts(&pattern[1..], &path[1..])
+            }
+        }
+    }
+
+    #[test]
+    fn component_matcher_agrees_with_exhaustive_short_input_oracle() {
+        let patterns = short_sequences(&['a', 'b', '?', '*'], 5);
+        let texts = short_sequences(&['a', 'b', '你'], 4);
+        for pattern in &patterns {
+            let pattern_string: String = pattern.iter().collect();
+            for text in &texts {
+                let text_string: String = text.iter().collect();
+                assert_eq!(
+                    match_component(&pattern_string, &text_string),
+                    reference_chars(pattern, text),
+                    "pattern={pattern_string:?}, text={text_string:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_matcher_agrees_with_exhaustive_short_input_oracle() {
+        let patterns = short_sequences(&["a", "b", "?", "a*", "**"], 3);
+        let paths = short_sequences(&["a", "b", "aa", "你"], 3);
+        for pattern in &patterns {
+            let parts: Vec<String> = pattern.iter().map(|part| part.to_string()).collect();
+            for path in &paths {
+                assert_eq!(
+                    match_parts(&parts, path),
+                    reference_parts(pattern, path),
+                    "pattern={pattern:?}, path={path:?}"
+                );
+            }
+        }
     }
 
     #[test]
