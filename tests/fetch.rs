@@ -439,3 +439,68 @@ fn fetch_replaces_longer_destination_with_matching_prefix() {
         }
     }
 }
+
+/// An unclassifiable payload gets the same verdict as tree mode for the
+/// same bytes: `skipped_unknown`, the summary `unknown` bucket, and the
+/// `unknown_files` list — not the generic error bucket.
+#[test]
+fn fetch_unknown_payload_is_skipped_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("unknown.cpp");
+    let report = dir.path().join("fetch-report.json");
+    let body: Vec<u8> = vec![0xFF, 0xFF, 0xFF];
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(body.len()),
+        body,
+        close_without_length: false,
+    });
+    let args = convert_url_args(url, out.clone(), report.clone(), 1024);
+    assert_eq!(run(Commands::Convert(args).into()), 1);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(doc["files"][0]["action"], "skipped_unknown");
+    assert_eq!(doc["summary"]["unknown"], 1);
+    assert_eq!(doc["summary"]["io_errors"], 0);
+    assert_eq!(doc["unknown_files"].as_array().unwrap().len(), 1);
+    assert!(doc["error_files"].as_array().unwrap().is_empty());
+    assert!(!out.exists(), "an unknown payload must not be written");
+}
+
+/// A write-protected destination is refused exactly like tree mode: the
+/// record is an error naming the protection, and the file is untouched.
+#[test]
+#[cfg(unix)]
+fn fetch_refuses_write_protected_destination() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("locked.cpp");
+    fs::write(&out, b"old bytes").unwrap();
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o444)).unwrap();
+    let report = dir.path().join("fetch-report.json");
+    let body = GBK_NIHAO.to_vec();
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(body.len()),
+        body,
+        close_without_length: false,
+    });
+    let args = convert_url_args(url, out.clone(), report.clone(), 1024);
+    assert_eq!(run(Commands::Convert(args).into()), 1);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(doc["files"][0]["action"], "error");
+    assert!(
+        doc["files"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("write-protected")
+    );
+    assert_eq!(fs::read(&out).unwrap(), b"old bytes");
+    let mode = fs::metadata(&out).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o777,
+        0o444,
+        "the locked mode must survive the refusal"
+    );
+    // Restore so tempdir cleanup can remove the file.
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o644)).unwrap();
+}

@@ -77,7 +77,7 @@ cargo build --release
 | `--dry-run`         | false           | No writes (convert, fix)                                         |
 | `--backup-dir`      | none            | Original bytes preserved (convert, fix)                          |
 | `--max-file-size`   | 200 MiB         | Above → `too_large`                                              |
-| `--threads`         | CPU count       | Rayon pool size (values below `1` clamp to `1`)                  |
+| `--threads`         | CPU count       | Rayon pool size (values below `1` clamp to `1`; values above `1024` are rejected as a fatal input error, exit 2) |
 | `--report`          | none            | JSON report path (auto-excluded from traversal)                  |
 | `--url`             | none            | **Remote fetch (convert only)**                                  |
 | `--output`          | derived         | Destination for `--url` (requires `--url`)                       |
@@ -193,8 +193,9 @@ must keep ignoring `--config`.
 ## 8. Code Quality Gates
 
 - `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test` (unit + integration)
+- `cargo doc` with warnings denied
 - **No `unwrap()` / `expect()`** in non-test code. Use `anyhow::Result`.
 - English comments only in `src/`. Chinese belongs in `README.zh-CN.md` / `docs/USAGE.zh-CN.md`.
 

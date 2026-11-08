@@ -120,7 +120,7 @@ pub struct TreeArgs {
     pub no_ignore_file: bool,
 
     /// Rayon worker thread count (default: CPU count; values below 1 are
-    /// treated as 1).
+    /// treated as 1, values above 1024 are a fatal input error).
     #[arg(long = "threads")]
     pub threads: Option<usize>,
 
@@ -138,8 +138,10 @@ pub struct TreeArgs {
 }
 
 impl Default for TreeArgs {
-    /// Mirrors the clap defaults (`root = "."`, `max_file_size = 200 MiB`) so
-    /// programmatic/test invocation behaves exactly like the CLI.
+    /// Mirrors the clap defaults (`root = "."`, `max_file_size` unset so the
+    /// config file merge applies, with the built-in 200 MiB cap applied by
+    /// [`TreeArgs::effective_max_file_size`]) so programmatic/test invocation
+    /// behaves exactly like the CLI.
     fn default() -> Self {
         TreeArgs {
             root: PathBuf::from("."),
@@ -150,7 +152,7 @@ impl Default for TreeArgs {
             include_rc: false,
             include_msbuild: false,
             include_hidden: false,
-            max_file_size: Some(DEFAULT_MAX_FILE_SIZE),
+            max_file_size: None,
             config: None,
             ignore_file: None,
             no_ignore_file: false,

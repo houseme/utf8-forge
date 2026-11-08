@@ -55,6 +55,14 @@ utf8-forge convert --root D:\server --target gb18030
 utf8-forge convert --url https://example.com/a.cpp --output ./a.cpp
 ```
 
+Remote fetch notes (`--url`): an unrecognizable payload (no detection match)
+is classified exactly like tree mode — action `skipped_unknown`, counted in
+`summary.unknown`, listed in `unknown_files` (not `error_files`), with one
+stderr problem line. A write-protected destination file is refused exactly
+like tree mode: exit 1, an `error` record with `io_error: file is
+write-protected (read-only); chmod +w to convert`; the destination is left
+untouched.
+
 Exit codes:
 
 - `0` — success (no unexpected errors).
@@ -156,7 +164,7 @@ Exit codes:
 | `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`); an empty normalized list (`--ext ""`) is fatal (exit 2)                                           |
 | `-x, --exclude <LIST>`     | see DESIGN §5.2 | Appended to default excludes                                                                                                                                               |
 | `-X, --exclude-ext <LIST>` | empty           | Appended                                                                                                                                                                   |
-| `--exclude-glob <GLOB>`    | empty           | Repeatable. Case-insensitive glob over root-relative path components; `/`-separated, `\` accepted; `**` spans components, `*`/`?` match within one; empty pattern → exit 2 |
+| `--exclude-glob <GLOB>`    | empty           | Repeatable. Case-insensitive (ASCII folding — non-ASCII byte pairs compare literally) glob over root-relative path components; `/`-separated, `\` accepted; `**` spans components, `*`/`?` match within one; empty pattern → exit 2 |
 | `--include-rc`             | false           | Adds `.rc/.rc2/.dlg`                                                                                                                                                       |
 | `--include-msbuild`        | false           | Adds `.sln/.vcxproj/...`                                                                                                                                                   |
 | `--include-hidden`         | false           | Processes dot-prefixed files and directories                                                                                                                               |
@@ -167,12 +175,18 @@ Exit codes:
 | `--dry-run`                | false           | No writes (convert, fix)                                                                                                                                                   |
 | `--backup-dir <PATH>`      | none            | Backup before overwrite (convert, fix)                                                                                                                                     |
 | `--max-file-size <BYTES>`  | 200 MiB         | Skip oversized                                                                                                                                                             |
-| `--threads <N>`            | CPU count       | Rayon pool; values below `1` clamp to `1`                                                                                                                                  |
+| `--threads <N>`            | CPU count       | Rayon pool; values below `1` clamp to `1`; values above `1024` are rejected as a fatal input error (exit 2)                                                                |
 | `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning; an unwritable report directory, or a report path that is an existing directory, is fatal (exit 2) before any processing |
 | `--url <URL>`              | none            | **Remote fetch (convert only)**; ignores `--root`                                                                                                                          |
 | `--output <PATH>`          | derived         | Destination for `--url` (requires `--url`)                                                                                                                                 |
 | `-q, --quiet`              | false           | Errors only                                                                                                                                                                |
 | `-v, --verbose`            | false           | Per-file detail                                                                                                                                                            |
+
+> `--exclude-glob` semantics: a pattern must match an entry's full
+> root-relative component list (a trailing `**` absorbs the rest, including
+> zero components) — `--exclude-glob src`, `src/` and `src/**` all exclude
+> the whole `src/` subtree (matching directories are pruned with their
+> contents); `**/name/**` excludes `name/` at any depth.
 
 **Per-command flag surface**: `--target`, `--dry-run` and `--backup-dir` exist
 on `convert` and `fix` (`fix` accepts only `--target utf-8`). `scan` and
@@ -198,7 +212,8 @@ Conflicts (fatal, exit 2):
 - (b) `--backup-dir` cannot be combined with `--url` (fatal, exit 2).
 - (c) `--backup-dir` inside `--root` is rejected (fatal, exit 2); an existing
   directory is placement-checked even under `--dry-run`.
-- (d) `--threads` values below `1` clamp to `1`.
+- (d) `--threads` values below `1` clamp to `1`; values above `1024` are
+  rejected as a fatal input error (exit 2).
 - (e) `--url` ignores `--root`.
 - (f) `--report` parent dirs are created; the report path itself is excluded
   from scanning.
@@ -338,10 +353,13 @@ build/**/auto*.h
 - `build/**/auto*.h` — `**` spans components; `*` / `?` match within one.
 - `!keep.gen` — `!` negates; the LAST matching pattern wins.
 
-Syntax is a gitignore subset: case-insensitive, no escapes (a backslash is a
-literal character), and — git parity — a file cannot be re-included when its
-parent directory is excluded. Negation lifts only the ignore layer; the
-whitelist / `--exclude` / `--exclude-glob` layers still apply.
+Syntax is a gitignore subset: case-insensitive (ASCII folding — non-ASCII
+byte pairs compare literally), no escapes (a backslash is a literal
+character), and — git parity — a file cannot be re-included when its parent
+directory is excluded. Folding is pinned by tests to ASCII letters: a
+non-ASCII pattern character matches only its literal counterpart. Negation
+lifts only the ignore layer; the whitelist / `--exclude` / `--exclude-glob`
+layers still apply.
 
 ### 5.8 Config file
 
@@ -394,7 +412,7 @@ Key fields:
   `would_convert` | `converted` | `unchanged` | `skipped_unknown` |
   `skipped_too_large` | `error`.
 - `unknown_files` — detection `unknown` (any mode) or `skipped_unknown` in
-  convert and fix; `error_files` — action `error` or verify `failed` (a file may appear
+  convert, fetch and fix; `error_files` — action `error` or verify `failed` (a file may appear
   in both; in fix mode verify failures are listed only in
   `verify_failed_files`).
 - `verify_failed_files` — fix mode only: paths whose verify record is `failed`;

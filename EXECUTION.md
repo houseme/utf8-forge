@@ -355,6 +355,13 @@ utf8-forge convert ^
   and nothing is written.
 - `--backup-dir` cannot be combined with `--url` — fatal (exit 2).
 - HTTP failures (non-2xx, TLS, timeout) → `summary.fetch_error=1`, exit 1.
+- An unrecognizable payload (no detection match) is classified exactly like
+  tree mode: `files[0].action="skipped_unknown"`, counted in
+  `summary.unknown`, listed in `unknown_files` (not `error_files`), with one
+  stderr problem line.
+- A write-protected destination file is refused exactly like tree mode:
+  exit 1, an `error` record with `io_error: file is write-protected
+  (read-only); chmod +w to convert`; the destination file is left untouched.
 - The fetch report is `mode: "fetch"` with `url` set; `root` is omitted; in `options`,
   `exclude_ext`/`exclude_globs`/`backup_dir` are omitted when empty (empty
   `extensions`/`exclude_dirs` remain).
@@ -520,19 +527,19 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "mode": "convert",                     // scan | convert | verify | fetch | fix
   "root": "D:\\server",                  // omitted in fetch mode
   "url": "https://example.com/a.cpp",    // omitted without --url
   "started_at": "2026-...",              // captured when per-file processing begins
                                          // (tree modes: after traversal; fetch: at request start)
-  "duration_ms": 8300,                   // per-file processing + console lines (report assembly
-                                         // excluded; traversal excluded in tree modes)
+  "duration_ms": 8300,                   // tree modes: per-file processing + console lines (traversal
+                                         // and report assembly excluded); fetch: download + transcode only
   "options": {
     "target": "utf-8",
     "dry_run": false,
-    "extensions": ["h","hpp","c","cpp"],
-    "exclude_dirs": ["dep","_tools"],
+    "extensions": ["c","cpp","h","hpp"],
+    "exclude_dirs": ["_tools","dep"],
     "exclude_ext": ["png"],               // omitted when empty
     "exclude_globs": ["**/Generated/**"], // omitted when empty
     "backup_dir": "D:\\backup\\utf8-forge\\orig",  // omitted when none
@@ -548,13 +555,22 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
                                          // unchanged | skipped_unknown | skipped_too_large | error
       "bytes_before": 12873,
       "bytes_after": 15201,
-      "duration_us": 912,
+      "duration_us": 912
+    },
+    {
+      "path": "D:\\server\\GameServer\\Locked.cpp",
+      "detected": "gb18030",
+      "action": "error",
+      "bytes_before": 9001,
+      "duration_us": 120,
       "error": "io_error: file is write-protected (read-only); chmod +w to convert"
                                            // present only on error/failed records
     }
   ],
-  "unknown_files": [],                   // detection unknown (any mode) or skipped_unknown in convert and fix
-  "error_files": [],                     // action error or verify failed — a file may appear in both; in fix
+  "unknown_files": [],                   // detection unknown (any mode) or skipped_unknown in convert, fetch and fix
+  "error_files": [                       // action error or verify failed — a file may appear in both; in fix
+    "D:\\server\\GameServer\\Locked.cpp"
+  ],
                                          // mode verify failures are listed only in verify_failed_files
   "verify_failed_files": []              // fix mode only: paths whose verify record is failed;
                                          // omitted when the gate is clean
@@ -597,7 +613,7 @@ line always goes to stderr, so `diff … | jq .` works):
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "mode": "diff",
   "before": "apply2.json",               // --before value verbatim
   "after": "apply3.json",                // --after value verbatim

@@ -283,7 +283,13 @@ O(pattern characters × filename characters) work. Path matching takes at most
 O(pattern components × path components) component comparisons. The matcher
 fully evaluates valid exclusions, including those that previously exhausted
 the recursive step budget. `?` consumes one Unicode scalar value, `*` stays
-within a component and `**` spans zero or more components.
+within a component and `**` spans zero or more components. Matching is
+case-insensitive (ASCII folding — non-ASCII byte pairs compare literally).
+A pattern matches a prefix of the root-relative component list: a bare `src`
+(or `src/`, or `src/**` — a trailing `**` spans zero components too) excludes
+the whole `src/` subtree (matching directories are pruned with their contents);
+`**/name/**` matches at any depth. A pattern must consume an entry's full
+root-relative component list.
 
 ### 5.4 Ignore Files
 
@@ -301,7 +307,10 @@ Supported syntax — a deliberate gitignore subset:
   without `/` matches the basename at any depth.
 - `**` spans path components; `*` / `?` match within one component.
 - `!` negation with **last-match-wins** ordering.
-- No escapes — a backslash is a literal character. Matching is case-insensitive.
+- No escapes — a backslash is a literal character. Matching is case-insensitive
+  (ASCII folding — non-ASCII byte pairs compare literally); folding is pinned
+  by tests to ASCII letters, so a non-ASCII pattern character matches only its
+  literal counterpart.
 
 Limitation inherited from git: a file cannot be re-included (`!`) when its
 parent directory is excluded — the walker prunes the subtree on the directory
@@ -519,7 +528,8 @@ SHARED TREE OPTIONS (accepted by scan / verify / convert / fix after the subcomm
                                replaces auto-discovery of <root>/.utf8forgeignore)
       --no-ignore-file         Disable ignore-file handling entirely
       --max-file-size <BYTES>  Skip files above this size (default 200 MiB)
-      --threads <N>            Rayon thread count (values below 1 clamp to 1)
+      --threads <N>            Rayon thread count (values below 1 clamp to 1;
+                               values above 1024 are a fatal input error, exit 2)
       --report <PATH>          Write JSON report
   -q, --quiet                  Errors only
   -v, --verbose                Per-file detail
@@ -565,7 +575,7 @@ Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
 ```toml
 [package]
 name = "utf8-forge"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 
 [[bin]]
@@ -692,7 +702,7 @@ in `src/`.
 | `fetch`: oversized response                             | `Err(too_large)`                |
 | `end_to_end`: mixed temp tree                           | Summary counts match            |
 
-CI gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+CI gates: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, and `cargo doc` with warnings denied.
 
 ---
 

@@ -206,6 +206,15 @@ mod tests {
     }
 
     #[test]
+    fn negation_and_dir_only_patterns_honor_crlf() {
+        let text = "*.log\r\n!keep.log\r\n";
+        assert!(ign(text, "drop.log", false));
+        assert!(!ign(text, "keep.log", false));
+        assert!(ign("logs/\r\n", "logs", true));
+        assert!(!ign("logs/\r\n", "logs/a.cpp", false));
+    }
+
+    #[test]
     fn double_star_spans_components() {
         assert!(ign("**/Generated/**", "a/Generated/x.cpp", false));
         assert!(ign("**/Generated/**", "Generated/y.cpp", false));

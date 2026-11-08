@@ -924,14 +924,32 @@ fn load_ignore(
     }
 }
 
-/// RFC 3339 timestamp captured when the run starts, so `started_at` +
-/// `duration_ms` line up even for long runs.
+/// RFC 3339 timestamp captured when per-file processing begins (the
+/// traversal is excluded), so `started_at` + `duration_ms` line up.
 fn wall_now() -> String {
     crate::reporter::rfc3339_now()
 }
 
+/// Upper bound for `--threads`: rayon pool startup cost grows quadratically,
+/// and implausible values silently wedge the process for minutes of pure CPU.
+/// Anything beyond 1024 hardware threads is not a real request, so it is a
+/// fatal input error (symmetric with the loud-strict-input posture).
+const MAX_THREADS: usize = 1024;
+
+/// Validate the configured thread count, in every mode that accepts the flag
+/// (fetch builds no pool but still refuses implausible values up front).
+fn ensure_thread_bound(threads: Option<usize>) -> anyhow::Result<()> {
+    match threads {
+        Some(n) if n > MAX_THREADS => bail!(
+            "--threads {n} exceeds the maximum of {MAX_THREADS}; build a smaller pool instead"
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Run `f` on the configured rayon pool (default pool when `--threads` unset).
 fn with_pool<R: Send>(threads: Option<usize>, f: impl FnOnce() -> R + Send) -> anyhow::Result<R> {
+    ensure_thread_bound(threads)?;
     match threads {
         Some(n) => {
             let pool = rayon::ThreadPoolBuilder::new()
@@ -1248,6 +1266,9 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
     if common.config.is_some() {
         bail!("--config is not supported with --url");
     }
+    // Fetch builds no rayon pool (a single file), but the same implausible
+    // thread counts the tree modes reject are refused here too.
+    ensure_thread_bound(common.threads)?;
     // Same report pre-flight as the tree modes: an unwritable report aborts
     // before the download, so no output is produced for a run that cannot be
     // audited.
@@ -1294,6 +1315,18 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
             let det = detect(&bytes);
             let tag = det.tag();
             match transcode_detected(&bytes, det, args.target_or_default()) {
+                Err(ForgeError::UnknownEncoding) => {
+                    // Same verdict as tree mode for identical bytes: recorded
+                    // as `skipped_unknown` (summary `unknown` bucket,
+                    // `unknown_files` list), printed once by `print_records`.
+                    RecBuilder::new(&out_path).done(
+                        Some(tag),
+                        "skipped_unknown",
+                        Some(raw_len),
+                        None,
+                        None,
+                    )
+                }
                 Err(e) => {
                     // Printed exactly once, by `print_records`, against the
                     // output path — the same single-line contract as the
@@ -1332,28 +1365,47 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
                             None,
                         )
                     } else {
-                        if let Some(parent) = out_path.parent()
-                            && !parent.as_os_str().is_empty()
-                        {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("cannot create output dir {}", parent.display())
-                            })?;
-                        }
-                        match writer::atomic_write(&out_path, &new_bytes) {
-                            Ok(()) => RecBuilder::new(&out_path).done(
-                                Some(tag),
-                                "converted",
-                                Some(raw_len),
-                                Some(new_bytes.len() as u64),
-                                None,
-                            ),
-                            Err(e) => RecBuilder::new(&out_path).done(
+                        // Same refusal as tree mode: POSIX rename would
+                        // silently bypass the permission bits, but the
+                        // operator locked that file on purpose.
+                        let write_protected = fs::metadata(&out_path)
+                            .map(|m| m.permissions().readonly())
+                            .unwrap_or(false);
+                        if write_protected {
+                            RecBuilder::new(&out_path).done(
                                 Some(tag),
                                 "error",
                                 Some(raw_len),
                                 None,
-                                Some(format!("{}: write failed: {e}", e.category())),
-                            ),
+                                Some(
+                                    "io_error: file is write-protected (read-only); chmod +w to convert"
+                                        .into(),
+                                ),
+                            )
+                        } else {
+                            if let Some(parent) = out_path.parent()
+                                && !parent.as_os_str().is_empty()
+                            {
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!("cannot create output dir {}", parent.display())
+                                })?;
+                            }
+                            match writer::atomic_write(&out_path, &new_bytes) {
+                                Ok(()) => RecBuilder::new(&out_path).done(
+                                    Some(tag),
+                                    "converted",
+                                    Some(raw_len),
+                                    Some(new_bytes.len() as u64),
+                                    None,
+                                ),
+                                Err(e) => RecBuilder::new(&out_path).done(
+                                    Some(tag),
+                                    "error",
+                                    Some(raw_len),
+                                    None,
+                                    Some(format!("{}: write failed: {e}", e.category())),
+                                ),
+                            }
                         }
                     }
                 }
@@ -1389,11 +1441,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
         Summary::Convert(s) => s.clone(),
         _ => ConvertSummary::default(),
     };
-    print_records(
-        std::slice::from_ref(&report.files[0]),
-        console,
-        Some(args.target_or_default().tag()),
-    );
+    print_records(&report.files, console, Some(args.target_or_default().tag()));
     if let Some(path) = &common.report {
         write_report(&report, path)?;
     }

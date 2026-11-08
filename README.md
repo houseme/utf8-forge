@@ -101,7 +101,8 @@ utf8-forge convert \
 `--max-file-size` (default 200 MiB).
 
 Notes: `--backup-dir` cannot be combined with `--url` (fatal, exit 2). An oversized payload fails with exit 1 and is
-not written. When `--output` is omitted, a URL segment with an extension is kept verbatim (`…/a.cpp` → `a.cpp`); an
+not written. A write-protected destination file is refused exactly like tree mode (exit 1; the destination is left
+untouched). When `--output` is omitted, a URL segment with an extension is kept verbatim (`…/a.cpp` → `a.cpp`); an
 extension-less segment gets `.utf8` (`…/foo` → `foo.utf8`). Re-fetching identical content reports `unchanged` and skips
 the write. The size cap is enforced during download — an oversized payload aborts mid-stream and nothing is written.
 

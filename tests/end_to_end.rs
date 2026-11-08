@@ -1322,3 +1322,88 @@ fn convert_and_fix_merge_config_with_cli_overrides() {
     assert_eq!(fs::read(backup.join("a.h")).unwrap(), GBK);
     assert_eq!(read_report(&report)["options"]["target"], "utf-8");
 }
+
+/// Thread counts beyond 1024 are a fatal input error: rayon pool startup
+/// cost grows quadratically and implausible values silently wedge the
+/// process. The bound itself stays accepted.
+#[test]
+fn threads_above_maximum_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+
+    let mut a = args(&root, None);
+    a.threads = Some(1025);
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+
+    a.threads = Some(1024);
+    assert_eq!(
+        run_tree(Commands::Scan, &a),
+        0,
+        "the maximum itself is accepted"
+    );
+}
+
+/// The config file's [options].max_file_size applies to runs built on
+/// TreeArgs::default (the cap comes from the merge, not the struct default),
+/// while a run without --config keeps the built-in 200 MiB cap.
+#[test]
+fn config_max_file_size_applies_to_default_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "big.cpp", b"longer-than-two");
+    let cfg = dir.path().join("forge.toml");
+    fs::write(&cfg, "[options]\nmax_file_size = 2\n").unwrap();
+
+    let report = dir.path().join("r.json");
+    let mut a = args(&root, Some(&report));
+    a.config = Some(cfg);
+    assert_eq!(run_tree(Commands::Scan, &a), 0);
+    let doc = read_report(&report);
+    assert_eq!(doc["summary"]["too_large"], 1);
+    assert_eq!(doc["summary"]["candidates"], 0);
+
+    // Without --config the built-in cap applies and the file is processed.
+    let report2 = dir.path().join("r2.json");
+    assert_eq!(run_tree(Commands::Scan, &args(&root, Some(&report2))), 0);
+    assert_eq!(read_report(&report2)["summary"]["too_large"], 0);
+}
+
+/// fix fails closed (exit 3) on a whitelisted file that exceeds the size
+/// cap: a gate must not wave through what it cannot inspect.
+#[test]
+fn fix_fails_closed_on_oversized_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "big.cpp", GBK);
+
+    let mut a = args(&root, None);
+    a.max_file_size = Some(2);
+    assert_eq!(run_fix(&a, |_| {}), 3);
+    assert_eq!(fs::read(root.join("big.cpp")).unwrap(), GBK);
+}
+
+/// Non-UTF-8 filenames survive the pipeline lossily: the file is scanned,
+/// reported under a replacement-character path, and never panics. APFS
+/// (macOS) rejects non-UTF-8 names at creation, so this runs on Linux only.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn non_utf8_filename_is_reported_lossily() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    let p = root.join(OsStr::from_bytes(b"bad\xff.cpp"));
+    fs::write(&p, b"plain\n").unwrap();
+
+    let report = dir.path().join("r.json");
+    assert_eq!(run_tree(Commands::Scan, &args(&root, Some(&report))), 0);
+    let doc = read_report(&report);
+    let path = doc["files"][0]["path"].as_str().unwrap();
+    assert!(path.contains('\u{FFFD}'), "lossy path in {path:?}");
+    assert_eq!(doc["files"][0]["detected"], "utf-8");
+}

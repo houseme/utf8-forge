@@ -165,7 +165,32 @@ Clippy with warnings denied. Formatting, rustdoc with warnings denied,
 178,425 generated cases against an independent exhaustive matcher. Matrix
 expansion checks confirm all nine platform/feature combinations.
 
+## R8 — Review-fix wave (v0.2.2, four-expert adversarial review of the R7 tree)
+
+Produced from a four-expert review (code correctness `E*`, docs-vs-code audit
+`F*`, adversarial CLI QA `G*`, dependency/API hygiene `H*`) of HEAD `f24c342`.
+23 findings: one P1, four P2, eighteen P3. The R7 surfaces (glob matcher,
+bounded reads, atomic write, fetch temp ownership) were independently cleared
+by three experts (178,425-case oracle, 800-pattern differential, ~150 CLI
+probes) with zero regressions. Verification of this wave: every change claim
+measured TRUE against the binary; the follow-up round's findings — the glob
+note's `src` vs `src/**` contrast (no observable difference), the threads
+bound not enforced in fetch mode (now enforced there too), and one internally
+inconsistent §12 example — were fixed and re-verified.
+
+| # | Priority | Item | Source | Acceptance |
+|---|----------|------|--------|------------|
+| R8.1 | [x] P1 | **CI smoke job fails on Windows**: the smoke script calls `python3`, which GitHub windows-latest runners deliberately do not provide (only `python`). With `fail-fast: false` the Windows leg fails on every push once it reaches that line. | H1 | smoke assertions run via `python` (or `jq`) on all three OSes; CI matrix green |
+| R8.2 | [x] P2 | **Fetch mode misbuckets unknown-encoding payloads as `io_errors`.** `cmd_convert_url` records action `error` for every transcode failure, while tree mode maps `UnknownEncoding` to `skipped_unknown`; the convert bucketing then falls through to `io_errors`, the row lands in both `unknown_files` and `error_files`, and the summary disagrees with tree mode on identical bytes. Fix: mirror `convert_file`'s `skipped_unknown` mapping (console line then matches the report row). | E1 | fetch of an unclassifiable payload → exit 1, `summary.unknown == 1`, `io_errors == 0`, action `skipped_unknown`, absent from `error_files`; test added |
+| R8.3 | [x] P2 | **Fetch silently clobbers a write-protected destination.** The read-only refusal lives in `convert_file` only; `--url` writes jump straight to `atomic_write`, and rename bypasses the mode bits (the file even gets its 0444 mode re-stamped). Fix: replicate the write-protected guard and message in the fetch write branch. | E2 | 0444 destination + differing fetch → exit 1, `error` record naming write-protected, bytes and mode unchanged; test added |
+| R8.4 | [x] P2 | **`--threads` has no upper bound**: `--threads 99999` deterministically wedges the process for tens of CPU-minutes even on a one-file tree (quadratic rayon pool startup), silently. Fix: values above 1024 are a fatal input error (exit 2), symmetric with the loud-strict-input posture; help and docs state the bound; fetch mode (which builds no pool) enforces the same bound up front. | G1 | `--threads 1024` accepted; `--threads 1025` → exit 2 with a clear message in tree and fetch modes; help + USAGE document the bound |
+| R8.5 | [x] P2 | **EXECUTION §12 example record contradicts its own rule**: a `converted` record carries an `error` field, impossible per reporter.rs (`skip_serializing_if`). Split the write-protected case into its own `error` record. | F1 | example matches the schema |
+| R8.6 | [x] P3 | **Strictness & defaults polish:** (a) `TreeArgs::default()` sets `max_file_size: Some(…)` so programmatic runs skip the `[options].max_file_size` merge — default to `None` like the parser (the masked config test asserts the effective cap); (b) `wall_now` doc comment says "when the run starts" but the stamp is taken after the walk — reword to "when per-file processing begins" (docs already say this); (c) replace `from_ref(&report.files[0])` with the slice; (d) document `FilterConfig` pub fields as post-normalization output of `build()`. | E4/E5/H7/H9 | config `[options].max_file_size` reaches programmatic runs; comments match behavior; no indexing in the fetch print path |
+| R8.7 | [x] P3 | **Docs precision (F/E/G):** ASCII-only case-insensitivity qualified in USAGE/DESIGN; `--exclude-glob` prefix semantics spelled out (a bare directory-name pattern excludes the whole subtree); EXECUTION §12 `options` example sorted as the binary emits; `duration_ms` comment split per mode (fetch excludes console lines); zh USAGE stray trailing `---` removed; DESIGN §13 / AGENT §8 CI-gate summary matches ci.yml (`--all-features`, `cargo doc` gate). | E3/G2/F2/F3/F4/F6 | every claim re-verified against the binary |
+| R8.8 | [x] P3 | **Workflow hygiene:** release.yml unused `BIN` variable (actionlint SC2034) removed, misleading smoke step renamed, stale `bsdtar` comment corrected, rust-clippy's `continue-on-error` annotated as advisory SARIF; pre-existing `(G1)`/`§7` comments in ci.yml scrubbed to plain statements. | H2–H6 | actionlint clean with no dead variables; workflow comments self-contained |
+| R8.9 | [x] P3 | **Tests & packaging notes:** ignore-file CRLF × negation combo test; e2e fix-with-oversized-file (exit 3); non-UTF-8 filename lossy-path test (cfg unix); the writer long-name test's unix-only gating noted. `AGENT.md` staying in the published crate's include list is recorded as deliberate (user-trimmed list). | H12/E-gaps | each gap has a named test; include-list decision recorded |
+
 ---
 
-*ROADMAP v0.4 — R1/R2, R5 and R6 record previous delivery waves. R7 tracks the
-current source-backed follow-up. R3 and R4 retain scope decisions.*
+*ROADMAP v0.5 — R1/R2, R5, R6 and R7 record previous delivery waves; R8 tracks
+the review of the R7 tree. R3 and R4 retain scope decisions.*

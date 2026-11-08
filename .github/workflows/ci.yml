@@ -114,17 +114,17 @@ jobs:
           # Protected and unknown files keep their original bytes.
           cmp "$ROOT/dep/lib.cpp"  <(printf 'dep\n')
           cmp "$ROOT/broken.cpp"   <(printf '\xFF\xFF\xFF')
-          # Converted files are now UTF-8 without BOM (G1).
+          # Converted files are now UTF-8 without BOM.
           cmp "$ROOT/gbk.cpp"      <(printf '// \xE4\xBD\xA0\xE5\xA5\xBD\n')
           cmp "$ROOT/bom.h"        <(printf '// bom\n')
           cmp "$ROOT/le.rs"        <(printf 'hi')
-          # Backup holds the pre-conversion bytes, mirrored (§7 rollback).
+          # Backup holds the pre-conversion bytes, mirrored for rollback.
           find backup -type f | grep -q 'gbk.cpp' || { echo "backup missing originals"; exit 1; }
 
           # Idempotence: second convert changes 0 bytes;
           # it still exits 1 because the unknown file is intentionally left.
           expect_exit 1 "$BIN" convert --root "$ROOT" --report second.json -q
-          python3 -c "import json;d=json.load(open('second.json'));assert d['summary']['converted']==0, d['summary']"
+          python -c "import json;d=json.load(open('second.json'));assert d['summary']['converted']==0, d['summary']"
 
           # Gate: verify flags only the unknown file (exit 3).
           expect_exit 3 "$BIN" verify --root "$ROOT"

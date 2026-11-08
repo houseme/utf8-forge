@@ -54,6 +54,13 @@ utf8-forge convert --root D:\server --target gb18030
 utf8-forge convert --url https://example.com/a.cpp --output ./a.cpp
 ```
 
+远程抓取（`--url`）说明：无法识别的载荷（检测不到匹配编码）按与树模式完全
+相同的方式归类 —— action `skipped_unknown`，计入 `summary.unknown`，列入
+`unknown_files`（而非 `error_files`），并在 stderr 打印一行问题提示。
+写保护的目标文件与树模式一样被拒绝：退出码 1，`error` 记录
+`io_error: file is write-protected (read-only); chmod +w to convert`，
+目标文件保持不变。
+
 退出码：
 
 - `0` —— 成功（无预期外错误）；
@@ -142,7 +149,7 @@ utf8-forge diff --before a.json --after b.json | jq .
 | `-e, --ext <LIST>`         | 见 DESIGN §5.1 | **替换**默认白名单；自动去除前导点（`.cpp` 等同 `cpp`）；归一化后为空（`--ext ""`）→ 致命（退出码 2）                              |
 | `-x, --exclude <LIST>`     | 见 DESIGN §5.2 | 追加到默认排除                                                                                                                    |
 | `-X, --exclude-ext <LIST>` | 空             | 追加                                                                                                                              |
-| `--exclude-glob <GLOB>`    | 空             | 可多次。对相对根的路径组件做大小写不敏感的 glob 匹配；以 `/` 分隔，接受 `\`；`**` 跨组件，`*`/`?` 匹配单组件内；空模式 → 退出码 2 |
+| `--exclude-glob <GLOB>`    | 空             | 可多次。对相对根的路径组件做大小写不敏感（仅 ASCII 折叠——非 ASCII 字节按字面比较）的 glob 匹配；以 `/` 分隔，接受 `\`；`**` 跨组件，`*`/`?` 匹配单组件内；空模式 → 退出码 2 |
 | `--include-rc`             | false          | 纳入 `.rc/.rc2/.dlg`                                                                                                              |
 | `--include-msbuild`        | false          | 纳入 `.sln/.vcxproj/...`                                                                                                          |
 | `--include-hidden`         | false          | 处理点前缀的文件与目录                                                                                                            |
@@ -153,12 +160,17 @@ utf8-forge diff --before a.json --after b.json | jq .
 | `--dry-run`                | false          | 不写盘（convert、fix）                                                                                                            |
 | `--backup-dir <PATH>`      | 无             | 覆盖前备份（convert、fix）                                                                                                        |
 | `--max-file-size <BYTES>`  | 200 MiB        | 超限跳过                                                                                                                          |
-| `--threads <N>`            | CPU 核数       | Rayon 池；小于 `1` 的值视为 `1`                                                                                                   |
+| `--threads <N>`            | CPU 核数       | Rayon 池；小于 `1` 的值视为 `1`；大于 `1024` 的值作为致命输入错误拒绝（退出码 2）                                                                                                |
 | `--report <PATH>`          | 无             | JSON 报告；自动创建父目录，报告路径本身会从扫描中排除；报告目录不可写，或报告路径是已存在目录，会在任何处理之前致命退出（退出码 2） |
 | `--url <URL>`              | 无             | **远程抓取（仅 convert）**；忽略 `--root`                                                                                         |
 | `--output <PATH>`          | 派生           | `--url` 的目标路径（必须与 `--url` 同用）                                                                                         |
 | `-q, --quiet`              | false          | 仅报错误                                                                                                                          |
 | `-v, --verbose`            | false          | 逐文件细节                                                                                                                        |
+
+> `--exclude-glob` 语义：模式必须匹配条目完整的根相对组件列表（末尾的
+> `**` 吸收其余组件，也包括零个组件）——`--exclude-glob src`、`src/` 与
+> `src/**` 都会排除整个 `src/` 子树（匹配到的目录连同内容一起剪枝）；
+> `**/name/**` 在任意深度排除 `name/`。
 
 **子命令旗标面**：`--target`、`--dry-run`、`--backup-dir` 由 `convert` 与
 `fix` 支持（`fix` 仅接受 `--target utf-8`）。`scan` 与 `verify` 会拒绝这些
@@ -181,7 +193,8 @@ utf8-forge diff --before a.json --after b.json | jq .
 - (a) `-e/--ext` **替换**默认白名单；opt-in 旗标（`--include-rc` / `--include-msbuild`）只在默认集合上追加，与 `-e` 同用时无效。
 - (b) `--backup-dir` 不能与 `--url` 同用（致命，退出码 2）。
 - (c) `--backup-dir` 位于 `--root` 内会被拒绝（致命，退出码 2）；目录已存在时，`--dry-run` 下同样进行位置检查。
-- (d) `--threads` 小于 `1` 的值视为 `1`。
+- (d) `--threads` 小于 `1` 的值视为 `1`；大于 `1024` 的值作为致命输入错误
+  拒绝（退出码 2）。
 - (e) `--url` 忽略 `--root`。
 - (f) `--report` 自动创建父目录；报告路径本身会从扫描中排除。
 - (g) 只读文件会被以 io 错误拒绝，绝不覆盖。
@@ -310,9 +323,11 @@ build/**/auto*.h
 - `build/**/auto*.h` —— `**` 跨组件；`*` / `?` 匹配单组件内。
 - `!keep.gen` —— `!` 否定；最后命中的模式获胜。
 
-语法是 gitignore 的子集：大小写不敏感，无转义（反斜杠是字面字符），并且与
-git 一致 —— 父目录被排除后，其中的文件无法被重新包含。否定只解除 ignore
-层；白名单 / `--exclude` / `--exclude-glob` 层仍然生效。
+语法是 gitignore 的子集：大小写不敏感（仅 ASCII 折叠——非 ASCII 字节按字面
+比较），无转义（反斜杠是字面字符），并且与 git 一致 —— 父目录被排除后，
+其中的文件无法被重新包含。折叠由测试断言固定为仅覆盖 ASCII 字母：模式中的
+非 ASCII 字符只匹配其字面本身。否定只解除 ignore 层；白名单 / `--exclude` /
+`--exclude-glob` 层仍然生效。
 
 ### 5.8 配置文件
 
@@ -362,7 +377,7 @@ JSON schema 见 `EXECUTION.md §12`。
   `failed`，从不做减法）；
 - `files[].action` —— 完整列表：`detected` | `passed` | `failed` | `would_convert` | `converted` | `unchanged` |
   `skipped_unknown` | `skipped_too_large` | `error`；
-- `unknown_files` —— 检测为 `unknown`（任何模式）或 convert 与 fix 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或
+- `unknown_files` —— 检测为 `unknown`（任何模式）或 convert、fetch、fix 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或
   verify `failed`（同一文件可能同时出现在两者中；fix 模式下 verify 失败仅记录在 `verify_failed_files` 中）；
 - `verify_failed_files` —— 仅 fix 模式：verify 记录为 `failed` 的路径；门禁干净时省略；
 - `options.ignore_file` —— 生效的 ignore 规则（显式路径原样记录，或自动发现的 `<root>/.utf8forgeignore`）；无规则生效时省略；
@@ -407,6 +422,3 @@ JSON schema 见 `EXECUTION.md §12`。
 ## 9. 故障排查
 
 见 `AGENT.md §9` 与 `EXECUTION.md §11`。
-
----
-

@@ -44,6 +44,8 @@ jobs:
           --all-targets
           --all-features
           --message-format=json | clippy-sarif | tee rust-clippy-results.sarif | sarif-fmt
+        # Advisory only: the SARIF upload should survive clippy hiccups.
+        # The enforcing clippy gate (-- -D warnings) lives in ci.yml's lint job.
         continue-on-error: true
 
       - name: Upload analysis results to GitHub

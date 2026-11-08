@@ -100,7 +100,7 @@ jobs:
         run: cargo test --locked
       - name: Build (no reqwest)
         run: cargo build --locked --no-default-features
-      - name: Smoke (release binary rollout loop)
+      - name: Build release binary (functional smoke runs in CI)
         run: cargo build --locked --release
 
   # ── Lint gate ───────────────────────────────────────────────────────────────
@@ -172,7 +172,6 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           STAGE="utf8-forge-${VERSION}-${{ matrix.target }}"
           mkdir -p "$STAGE"
-          BIN="utf8-forge"
           EXT=""
           [ "${{ matrix.os }}" = "windows-latest" ] && EXT=".exe" || true
           cp "target/${{ matrix.target }}/release/utf8-forge$EXT" "$STAGE/utf8-forge$EXT"
@@ -184,7 +183,8 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.prepare.outputs.version }}"
-          # bsdtar on all runners infers the format from the extension (-a).
+          # tar -a infers the format from the archive extension (GNU tar on
+          # Linux, bsdtar on macOS/Windows).
           tar -a -cf "utf8-forge-${VERSION}-${{ matrix.target }}.${{ matrix.archive }}" "$stage"
 
       - name: Checksum

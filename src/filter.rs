@@ -104,7 +104,10 @@ pub struct FilterOptions {
     pub include_hidden: bool,
 }
 
-/// Compiled, effective filter configuration.
+/// Compiled, effective filter configuration. The fields are the
+/// post-normalization output of [`FilterConfig::build`] (lowercased,
+/// validated, compiled) — constructing them by hand bypasses that
+/// normalization, so always go through `build`.
 #[derive(Debug, Clone)]
 pub struct FilterConfig {
     /// Effective extension whitelist (lowercased).
