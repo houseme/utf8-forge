@@ -169,6 +169,11 @@ pub struct Report {
     /// the gate is clean, so other modes stay schema-compatible.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub verify_failed_files: Vec<String>,
+    /// Non-fatal traversal/ignore warnings (unreadable directories etc.).
+    /// In `verify`/`fix` an unreadable subtree fails the gate, so a non-empty
+    /// list there always accompanies exit code 3. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Format a unix timestamp as RFC 3339 UTC (`1970-01-01T00:00:00Z` style).

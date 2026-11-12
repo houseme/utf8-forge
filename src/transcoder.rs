@@ -153,7 +153,10 @@ pub fn decode_strict(bytes: &[u8], enc: DetectedEncoding) -> Result<Cow<'_, str>
             false,
         ),
         DetectedEncoding::Gb18030 => {
-            let (cow, _, had_errors) = GB18030.decode(bytes);
+            // Skip encoding_rs' BOM sniffing: the caller's verdict came from
+            // `detect`, which routes every BOM prefix to its own encoding, so
+            // a UTF-16 BOM here must be a decode error, not a re-routed read.
+            let (cow, had_errors) = GB18030.decode_without_bom_handling(bytes);
             if had_errors {
                 return Err(ForgeError::DecodeError("invalid gb18030 sequence".into()));
             }
@@ -192,20 +195,39 @@ fn decode_utf32(rest: &[u8], little_endian: bool) -> Result<Cow<'_, str>, ForgeE
 
 /// Encode `text` into `target`. BOMs for `utf-8-bom` / `utf-16le` /
 /// `utf-16be` are prepended manually — `encoding_rs` never emits them.
-pub fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
+///
+/// Fails instead of writing mojibake: a UTF-16LE target whose content begins
+/// with U+0000 is refused (the output would begin `FF FE 00 00`, which the
+/// detector reads back as the UTF-32LE BOM), and GB18030 refuses content
+/// containing U+E5E5 — the single Unicode scalar the WHATWG gb18030 encoder
+/// cannot map (encoding_rs would silently write the literal text `&#58853;`).
+pub fn encode(text: &str, target: TargetEncoding) -> Result<Vec<u8>, ForgeError> {
     match target {
-        TargetEncoding::Utf8 => text.as_bytes().to_vec(),
+        TargetEncoding::Utf8 => Ok(text.as_bytes().to_vec()),
         TargetEncoding::Utf8Bom => {
             let mut v = Vec::with_capacity(3 + text.len());
             v.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
             v.extend_from_slice(text.as_bytes());
-            v
+            Ok(v)
         }
         TargetEncoding::Gb18030 => {
-            let (cow, _, _) = GB18030.encode(text);
-            cow.into_owned()
+            let (cow, _, had_errors) = GB18030.encode(text);
+            if had_errors {
+                return Err(ForgeError::EncodeError(
+                    "content contains characters unmappable in gb18030 (U+E5E5)".into(),
+                ));
+            }
+            Ok(cow.into_owned())
         }
         TargetEncoding::Utf16Le => {
+            if text.starts_with('\u{0}') {
+                return Err(ForgeError::EncodeError(
+                    "utf-16le output would begin with `FF FE 00 00` (indistinguishable from the \
+                     utf-32le BOM) because the content begins with U+0000; the file could not be \
+                     re-read as UTF-16 on the next run"
+                        .into(),
+                ));
+            }
             // encoding_rs' generic `encode()` would silently emit UTF-8 here
             // (its `output_encoding()` maps UTF-16 targets back to UTF-8), so
             // UTF-16 bytes are produced directly from std's `encode_utf16()`,
@@ -215,7 +237,7 @@ pub fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
             for unit in text.encode_utf16() {
                 v.extend_from_slice(&unit.to_le_bytes());
             }
-            v
+            Ok(v)
         }
         TargetEncoding::Utf16Be => {
             let mut v = Vec::with_capacity(2 + text.len() * 2);
@@ -223,7 +245,7 @@ pub fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
             for unit in text.encode_utf16() {
                 v.extend_from_slice(&unit.to_be_bytes());
             }
-            v
+            Ok(v)
         }
     }
 }
@@ -239,13 +261,9 @@ pub fn transcode(bytes: &[u8], target: TargetEncoding) -> Result<TranscodeOutcom
 /// Fast path: `Utf8` → `utf-8` returns [`TranscodeOutcome::Unchanged`] with
 /// zero allocation. Otherwise strict-decode, encode, and compare: a
 /// byte-identical result is reported as `Unchanged` so callers skip the write
-/// and a second pass over the same tree touches no file.
-///
-/// A UTF-16LE target whose decoded text begins with `U+0000` is refused
-/// ([`ForgeError::EncodeError`]): the output would start `FF FE 00 00`, which
-/// the detector reads back as the UTF-32LE BOM, so the file could never be
-/// re-read as UTF-16 again. UTF-16BE is safe (`FE FF 00 00` re-reads as
-/// UTF-16BE).
+/// and a second pass over the same tree touches no file. Encoding refusals
+/// ([`ForgeError::EncodeError`] — the UTF-16LE NUL guard and the GB18030
+/// unmappable scalar) come from [`encode`] and never write mojibake.
 pub fn transcode_detected(
     bytes: &[u8],
     detected: DetectedEncoding,
@@ -255,15 +273,7 @@ pub fn transcode_detected(
         return Ok(TranscodeOutcome::Unchanged);
     }
     let text = decode_strict(bytes, detected)?;
-    if target == TargetEncoding::Utf16Le && text.starts_with('\u{0}') {
-        return Err(ForgeError::EncodeError(
-            "utf-16le output would begin with `FF FE 00 00` (indistinguishable from the \
-             utf-32le BOM) because the content begins with U+0000; the file could not be \
-             re-read as UTF-16 on the next run"
-                .into(),
-        ));
-    }
-    let encoded = encode(&text, target);
+    let encoded = encode(&text, target)?;
     if encoded == bytes {
         Ok(TranscodeOutcome::Unchanged)
     } else {
@@ -303,14 +313,14 @@ mod tests {
         // "hi" encoded to UTF-16LE must start with FF FE — encoding_rs alone
         // would not emit it.
         assert_eq!(
-            encode("hi", TargetEncoding::Utf16Le),
+            encode("hi", TargetEncoding::Utf16Le).unwrap(),
             vec![0xFF, 0xFE, b'h', 0, b'i', 0]
         );
         assert_eq!(
-            encode("hi", TargetEncoding::Utf16Be),
+            encode("hi", TargetEncoding::Utf16Be).unwrap(),
             vec![0xFE, 0xFF, 0, b'h', 0, b'i']
         );
-        assert_eq!(encode("hi", TargetEncoding::Utf8Bom), {
+        assert_eq!(encode("hi", TargetEncoding::Utf8Bom).unwrap(), {
             let mut v = vec![0xEF, 0xBB, 0xBF];
             v.extend_from_slice(b"hi");
             v

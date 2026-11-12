@@ -72,8 +72,11 @@ Exit codes:
   reports against the output path.
 - `2` — fatal (bad args, missing root, flag conflicts, `--backup-dir` inside
   `--root` or combined with `--url`, `--config` combined with `--url`,
-  unwritable `--report` location). With `--url` the `--report` pre-flight runs
-  before the download starts, so a failure writes nothing.
+  an unwritable or refused `--report` location — an existing write-protected
+  report file, or (tree modes) a report path equal to the active ignore
+  file). With `--url`
+  the `--report` pre-flight runs before the download starts, so a failure
+  writes nothing.
 
 ### 2.3 `verify`
 
@@ -86,8 +89,9 @@ utf8-forge verify --root D:\server --report verify.json
 Exit codes:
 
 - `0` — all UTF-8 no BOM.
-- `3` — one or more files not UTF-8 no BOM. Oversized or unreadable files count
-  as failed (fail-closed).
+- `3` — one or more files not UTF-8 no BOM, or traversal could not inspect part
+  of the tree. Oversized or unreadable files count as failed (fail-closed);
+  the walk warning prints to stderr even under `--quiet`.
 - `2` — fatal (missing root, bad args).
 
 ### 2.4 `fix`
@@ -111,9 +115,10 @@ before anything is touched, because the verify gate asserts UTF-8 without BOM.
 Exit codes:
 
 - `0` — conversion ran and every file passed the verify gate.
-- `3` — the gate wins: any file fails the verify pass (not UTF-8 without BOM,
-  `unknown`, oversized, unreadable — all fail closed). The report carries
-  `verify_failed_files`.
+- `3` — the gate wins: any file fails the verify pass, or traversal could not
+  inspect part of the tree (not UTF-8 without BOM, `unknown`, oversized,
+  unreadable — all fail closed). The report carries `verify_failed_files`;
+  the walk warning prints to stderr even under `--quiet`.
 - `1` — convert-side issues (`unknown` / `decode_error` / `encode_error` /
   `io_error`) with no verify failure.
 - `2` — fatal (bad args, missing root, `--backup-dir` inside `--root`,
@@ -151,8 +156,10 @@ Exit codes:
 - `0` — comparison finished (differences do NOT change the exit code).
 - `1` — `--fail-on-change` and the diff is non-empty (added + removed +
   changed > 0).
-- `2` — missing input report, or input that is not a utf8-forge report with a
-  `files[]` array.
+- `2` — missing input report, input that is not a utf8-forge report with a
+  `files[]` array, or a refused `--report` path (an existing write-protected
+  report file; `diff` reads no ignore file, so the ignore-file rule does not
+  apply here).
 
 ---
 
@@ -176,10 +183,10 @@ Exit codes:
 | `--backup-dir <PATH>`      | none            | Backup before overwrite (convert, fix)                                                                                                                                     |
 | `--max-file-size <BYTES>`  | 200 MiB         | Skip oversized                                                                                                                                                             |
 | `--threads <N>`            | CPU count       | Rayon pool; values below `1` clamp to `1`; values above `1024` are rejected as a fatal input error (exit 2)                                                                |
-| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning; an unwritable report directory, or a report path that is an existing directory, is fatal (exit 2) before any processing |
+| `--report <PATH>`          | none            | JSON report; parent dirs are created, the report path is excluded from scanning; an unwritable report directory, a report path that is an existing directory, an existing write-protected report file, or a report path equal to the active ignore file (`--ignore-file` / auto-discovered `<root>/.utf8forgeignore`) is fatal (exit 2) before any processing |
 | `--url <URL>`              | none            | **Remote fetch (convert only)**; ignores `--root`                                                                                                                          |
 | `--output <PATH>`          | derived         | Destination for `--url` (requires `--url`)                                                                                                                                 |
-| `-q, --quiet`              | false           | Errors only                                                                                                                                                                |
+| `-q, --quiet`              | false           | Errors only; in `verify` / `fix`, a walk warning about an uninspectable subtree still prints to stderr                                                                                                                                                                |
 | `-v, --verbose`            | false           | Per-file detail                                                                                                                                                            |
 
 > `--exclude-glob` semantics: a pattern must match an entry's full
@@ -216,7 +223,11 @@ Conflicts (fatal, exit 2):
   rejected as a fatal input error (exit 2).
 - (e) `--url` ignores `--root`.
 - (f) `--report` parent dirs are created; the report path itself is excluded
-  from scanning.
+  from scanning. An existing write-protected report file is refused (exit 2,
+  pre-flight, nothing touched — the same philosophy as write-protected source
+  files), and a report path equal to the active ignore file (`--ignore-file`
+  or auto-discovered `<root>/.utf8forgeignore`) is refused as well: the rule
+  file is never overwritten by report JSON.
 - (g) read-only files are refused with an io error, never overwritten.
 - (h) ignore file: an explicit `--ignore-file` that is missing is fatal (exit 2); auto-discovery of
   `<root>/.utf8forgeignore` (flag absent) is
@@ -276,6 +287,24 @@ BOM). There is **no** UTF-32 write target (`--target utf-32le` → exit 2), and
 
 Never normalized. CRLF stays CRLF; LF stays LF.
 
+### 4.4 GB18030 target
+
+`--target gb18030` uses WHATWG's gb18030 encoder, which cannot map exactly one
+Unicode scalar: **U+E5E5** (a Private Use Area character that legacy files
+sometimes contain). Content containing U+E5E5 is refused: the file is recorded
+as an `error` row with an `encode_error` reason (exit 1, original bytes
+untouched) — the same refusal pattern as the UTF-16LE NUL guard (§4.1).
+
+The WHATWG mappings are also canonical: a `--target gb18030` pass over
+already-GB18030 files rewrites legacy byte spellings into their canonical
+WHATWG forms — byte `0x80` → `A2 E3` for the euro sign, `A3 A0` → `A1 A1` for
+the ideographic space, and 18 further scalars — the CJK ideographs
+U+9FB4–U+9FBB and the vertical forms U+FE10–U+FE19, whose legacy byte
+spellings formerly encoded Private Use Area characters — consolidate onto
+their assigned equivalents. Such files are byte-different but
+content-equivalent: the first pass reports them `converted`, and the result is
+idempotent from the second pass on.
+
 ---
 
 ## 5. Recipes
@@ -319,6 +348,10 @@ utf8-forge convert \
 ```bash
 utf8-forge convert --root D:\server\legacy\scripts --target gb18030 --ext bat,cmd
 ```
+
+> Content containing U+E5E5 is refused (`error` row, exit 1); already-GB18030
+> files are rewritten to their canonical WHATWG byte forms on the first pass
+> (see §4.4).
 
 ### 5.7 Ignore file
 
@@ -390,7 +423,9 @@ threads = 8
 ```
 
 Precedence is CLI > config > defaults. List values REPLACE across layers (never concatenate). Missing, malformed, or
-unknown-key files are fatal (exit 2) — messages carry the TOML line/column. `root`, `report`, `dry-run`,
+unknown-key files are fatal (exit 2) — messages carry the TOML line/column. Value validation mirrors the CLI:
+`[filter].extensions = []` (present but empty) is fatal (exit 2) exactly like `--ext ""` — an absent key keeps the
+default whitelist — and `[convert].backup_dir = ""` is fatal, naming the key. `root`, `report`, `dry-run`,
 `url`, `output`, `ignore_file`, and quiet/verbose are deliberately absent from
 the schema (`ignore_file` in TOML is a fatal unknown key); `--config` combined
 with `--url` is fatal too — fetch mode reads no config.
@@ -417,6 +452,8 @@ Key fields:
   `verify_failed_files`).
 - `verify_failed_files` — fix mode only: paths whose verify record is `failed`;
   omitted when the gate is clean.
+- `warnings` — top-level string array of walk/ignore warnings (e.g. a directory
+  the traversal could not enter, an unreadable ignore file); omitted when empty.
 - `options.ignore_file` — ignore rules in effect (explicit path verbatim, or
   the auto-discovered `<root>/.utf8forgeignore`); omitted when no rules are
   active.
@@ -437,7 +474,10 @@ The `summary` block is mode-specific:
   `failed` from the verify pass over the same tree.
 
 `already_utf8` counts files already byte-identical at the **target** encoding:
-with `--target gb18030`, untouched ASCII files count too.
+with `--target gb18030`, untouched ASCII files count too. GB18030 files that
+carry legacy byte spellings are **not** byte-identical: the first
+`--target gb18030` pass canonicalizes them (§4.4) and reports `converted`;
+they count as unchanged only from the second pass on.
 
 ---
 
@@ -448,7 +488,7 @@ with `--target gb18030`, untouched ASCII files count too.
 | 0    | Success (`diff`: comparison finished — differences do not change the exit code unless `--fail-on-change`)                                                                      |
 | 1    | Non-fatal per-file issues (`unknown`, `decode_error`, `encode_error`, `io_error`; convert: also `fetch_error`, oversized `--url` payload); `diff --fail-on-change`: the reports differ |
 | 2    | Fatal in every command (bad args, missing root, flag conflicts, I/O setup failure); also emitted by clap; `diff`: missing/malformed input report                               |
-| 3    | `verify` found non-UTF-8 whitelisted files; `fix`: any file fails the verify gate (oversized/unreadable count as failed — fail-closed; the gate wins over convert-side issues) |
+| 3    | `verify` found non-UTF-8 whitelisted files (or could not inspect part of the tree); `fix`: any file fails the verify gate (oversized/unreadable count as failed — fail-closed; the gate wins over convert-side issues) |
 
 ---
 

@@ -384,3 +384,27 @@ fn gb18030_four_byte_round_trip_is_lossless() {
         TranscodeOutcome::Unchanged => panic!("gb18030 must decode back to utf-8"),
     }
 }
+
+#[test]
+fn gb18030_target_refuses_the_unmappable_scalar_u_e5e5() {
+    // U+E5E5 is the only Unicode scalar WHATWG's gb18030 encoder cannot map;
+    // encoding_rs would silently write the literal text `&#58853;`. The
+    // encoder refuses instead of writing mojibake.
+    let err = transcode("x \u{E5E5} y".as_bytes(), TargetEncoding::Gb18030).unwrap_err();
+    assert_eq!(err.category(), "encode_error");
+    // Neighbors map fine and round-trip.
+    for cp in ["\u{E5E4}", "\u{E5E6}", "\u{4E2D}"] {
+        match transcode(cp.as_bytes(), TargetEncoding::Gb18030).unwrap() {
+            TranscodeOutcome::Changed(bytes) => {
+                let back = transcode(&bytes, TargetEncoding::Utf8).unwrap();
+                match back {
+                    TranscodeOutcome::Changed(restored) => {
+                        assert_eq!(restored, cp.as_bytes().to_vec(), "round trip of {cp}");
+                    }
+                    TranscodeOutcome::Unchanged => panic!("gb bytes must restore to {cp}"),
+                }
+            }
+            TranscodeOutcome::Unchanged => panic!("{cp} must encode to gb18030"),
+        }
+    }
+}

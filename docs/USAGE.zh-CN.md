@@ -67,7 +67,9 @@ utf8-forge convert --url https://example.com/a.cpp --output ./a.cpp
 - `1` —— 存在 `unknown` / `decode_error` / `encode_error` / `io_error`；`--url` 时还包括 `fetch_error`（HTTP/TLS/超时失败）
   与超限载荷。每个问题都会在 stderr 打印一行提示；`--url` 时解码错误针对输出路径报告；
 - `2` —— 致命（参数错误、root 缺失、旗标冲突、`--backup-dir` 位于 `--root` 内或与 `--url` 同用、`--config` 与 `--url`
-  同用、`--report` 位置不可写）。`--url` 时 `--report` 预检在下载开始前执行，失败即不写任何内容。
+  同用、`--report` 位置不可写或被拒绝 —— 已存在的写保护报告文件，或（树模式）
+  报告路径与生效的 ignore 文件相同）。`--url` 时
+  `--report` 预检在下载开始前执行，失败即不写任何内容。
 
 ### 2.3 `verify`
 
@@ -80,7 +82,8 @@ utf8-forge verify --root D:\server --report verify.json
 退出码：
 
 - `0` —— 全部 UTF-8 无 BOM；
-- `3` —— 有一个或多个不符。超限或不可读的文件计为失败（fail-closed，宁严勿漏）；
+- `3` —— 有一个或多个不符，或遍历无法检查树的一部分。超限或不可读的文件计为失败
+  （fail-closed，宁严勿漏）；即使指定 `--quiet`，遍历警告仍会打印到 stderr；
 - `2` —— 致命（root 缺失、参数错误）。
 
 ### 2.4 `fix`
@@ -103,8 +106,9 @@ utf8-forge fix --root D:\server --dry-run
 退出码：
 
 - `0` —— 转换完成且所有文件通过验证门禁；
-- `3` —— 门禁优先：任一文件未通过验证（不是无 BOM 的 UTF-8、`unknown`、超限、不可读 —— 全部 fail-closed）。报告中带
-  `verify_failed_files`；
+- `3` —— 门禁优先：任一文件未通过验证，或遍历无法检查树的一部分（不是无 BOM 的
+  UTF-8、`unknown`、超限、不可读 —— 全部 fail-closed）。报告中带
+  `verify_failed_files`；即使指定 `--quiet`，遍历警告仍会打印到 stderr；
 - `1` —— 仅有转换侧问题（`unknown` / `decode_error` / `encode_error` / `io_error`），且无验证失败；
 - `2` —— 致命（参数错误、root 缺失、`--backup-dir` 位于 `--root` 内、非 `utf-8` 的 `--target`）。
 
@@ -137,7 +141,9 @@ utf8-forge diff --before a.json --after b.json | jq .
 - `0` —— 对比完成（存在差异 **不**改变退出码）；
 - `1` —— 指定 `--fail-on-change` 且 diff 非空（added + removed +
   changed > 0）；
-- `2` —— 输入报告缺失，或输入不是带 `files[]` 数组的 utf8-forge 报告。
+- `2` —— 输入报告缺失，输入不是带 `files[]` 数组的 utf8-forge 报告，或 `--report`
+  路径被拒绝（已存在的写保护报告文件；diff 不读取 ignore 文件，因此该条规则
+  在此处不适用）。
 
 ---
 
@@ -161,10 +167,10 @@ utf8-forge diff --before a.json --after b.json | jq .
 | `--backup-dir <PATH>`      | 无             | 覆盖前备份（convert、fix）                                                                                                        |
 | `--max-file-size <BYTES>`  | 200 MiB        | 超限跳过                                                                                                                          |
 | `--threads <N>`            | CPU 核数       | Rayon 池；小于 `1` 的值视为 `1`；大于 `1024` 的值作为致命输入错误拒绝（退出码 2）                                                                                                |
-| `--report <PATH>`          | 无             | JSON 报告；自动创建父目录，报告路径本身会从扫描中排除；报告目录不可写，或报告路径是已存在目录，会在任何处理之前致命退出（退出码 2） |
+| `--report <PATH>`          | 无             | JSON 报告；自动创建父目录，报告路径本身会从扫描中排除；报告目录不可写、报告路径是已存在目录、已存在的报告文件写保护，或报告路径与生效的 ignore 文件（`--ignore-file` / 自动发现的 `<root>/.utf8forgeignore`）相同，均会在任何处理之前致命退出（退出码 2） |
 | `--url <URL>`              | 无             | **远程抓取（仅 convert）**；忽略 `--root`                                                                                         |
 | `--output <PATH>`          | 派生           | `--url` 的目标路径（必须与 `--url` 同用）                                                                                         |
-| `-q, --quiet`              | false          | 仅报错误                                                                                                                          |
+| `-q, --quiet`              | false          | 仅报错误；`verify` / `fix` 中，无法检查的子树产生的遍历警告仍会打印到 stderr                                                                                                                          |
 | `-v, --verbose`            | false          | 逐文件细节                                                                                                                        |
 
 > `--exclude-glob` 语义：模式必须匹配条目完整的根相对组件列表（末尾的
@@ -196,7 +202,10 @@ utf8-forge diff --before a.json --after b.json | jq .
 - (d) `--threads` 小于 `1` 的值视为 `1`；大于 `1024` 的值作为致命输入错误
   拒绝（退出码 2）。
 - (e) `--url` 忽略 `--root`。
-- (f) `--report` 自动创建父目录；报告路径本身会从扫描中排除。
+- (f) `--report` 自动创建父目录；报告路径本身会从扫描中排除。已存在的写保护
+  报告文件会被拒绝（退出码 2，预检阶段，不触碰任何内容 —— 与写保护源文件同一
+  哲学）；报告路径与生效的 ignore 文件（`--ignore-file` 或自动发现的
+  `<root>/.utf8forgeignore`）相同样被拒绝：规则文件绝不会被报告 JSON 覆盖。
 - (g) 只读文件会被以 io 错误拒绝，绝不覆盖。
 - (h) ignore 文件：显式 `--ignore-file` 缺失即致命（退出码 2）；自动发现
   `<root>/.utf8forgeignore`（未指定旗标时）缺失则静默，不可读则警告后继续；
@@ -248,6 +257,20 @@ UTF-32 为只读：严格解码拒绝代理区码元、大于 `0x10FFFF` 的标�
 
 永不归一化。CRLF 保持 CRLF；LF 保持 LF。
 
+### 4.4 GB18030 目标
+
+`--target gb18030` 使用 WHATWG 的 gb18030 编码器，它恰好有一个无法映射的
+Unicode 标量： **U+E5E5**（遗留文件有时包含的私用区字符）。包含 U+E5E5 的内容
+会被拒绝：文件记录为带 `encode_error` 原因的 `error` 行（退出码 1，原字节不受
+影响）—— 与 UTF-16LE NUL 守卫（§4.1）是同一种拒绝模式。
+
+WHATWG 映射同时也是规范形：对已是 GB18030 的文件执行 `--target gb18030` 会把
+遗留字节写法重写为规范的 WHATWG 形式 —— 字节 `0x80` → `A2 E3`（欧元符号）、
+`A3 A0` → `A1 A1`（表意空格），以及 18 个其他标量——CJK 汉字 U+9FB4–U+9FBB 与
+竖排形式 U+FE10–U+FE19（其遗留字节写法曾编码私用区字符）——合并到其既定等价
+字符上。
+这类文件字节不同但内容等价：第一遍报告为 `converted`，从第二遍起幂等。
+
 ---
 
 ## 5. 配方
@@ -291,6 +314,9 @@ utf8-forge convert \
 ```bash
 utf8-forge convert --root D:\server\legacy\scripts --target gb18030 --ext bat,cmd
 ```
+
+> 包含 U+E5E5 的内容会被拒绝（`error` 行，退出码 1）；已是 GB18030 的文件会在
+> 第一遍被重写为规范的 WHATWG 字节形式（见 §4.4）。
 
 ### 5.7 ignore 文件
 
@@ -358,7 +384,10 @@ threads = 8
 ```
 
 优先级为 CLI > 配置 > 默认。列表值跨层 **替换**（绝不拼接）。文件缺失、格式
-错误或含未知键均为致命（退出码 2）—— 错误信息携带 TOML 行/列。
+错误或含未知键均为致命（退出码 2）—— 错误信息携带 TOML 行/列。取值校验与 CLI
+一致：`[filter].extensions = []`（键存在但为空）与 `--ext ""` 一样致命
+（退出码 2）—— 键缺省时保留默认白名单；`[convert].backup_dir = ""` 为致命，
+错误信息会指明该键。
 `root`、`report`、`dry-run`、`url`、`output`、`ignore_file` 与 quiet/verbose
 被有意排除在 schema 之外（`ignore_file` 出现在 TOML 中即致命未知键）；
 `--config` 与 `--url` 同用同样致命 —— fetch 模式不读取配置。
@@ -380,6 +409,8 @@ JSON schema 见 `EXECUTION.md §12`。
 - `unknown_files` —— 检测为 `unknown`（任何模式）或 convert、fetch、fix 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或
   verify `failed`（同一文件可能同时出现在两者中；fix 模式下 verify 失败仅记录在 `verify_failed_files` 中）；
 - `verify_failed_files` —— 仅 fix 模式：verify 记录为 `failed` 的路径；门禁干净时省略；
+- `warnings` —— 顶层字符串数组，携带遍历/ignore 警告（例如无法进入的目录、不可读
+  的 ignore 文件）；为空时省略；
 - `options.ignore_file` —— 生效的 ignore 规则（显式路径原样记录，或自动发现的 `<root>/.utf8forgeignore`）；无规则生效时省略；
 - `options.config_file` —— `--config` 的值原样记录；未指定时省略。
 
@@ -393,7 +424,7 @@ JSON schema 见 `EXECUTION.md §12`。
   `io_errors` / `too_large` / `fetch_error`；
 - `fix` —— 转换计数（同上，但无 `fetch_error`）外加对同一棵树验证得到的 `passed` / `failed`。
 
-`already_utf8` 统计在 **目标**编码下字节已完全一致的文件：使用 `--target gb18030` 时，未改动的纯 ASCII 文件也计入。
+`already_utf8` 统计在 **目标**编码下字节已完全一致的文件：使用 `--target gb18030` 时，未改动的纯 ASCII 文件也计入。携带遗留字节写法的 GB18030 文件 **并非**字节一致：第一遍 `--target gb18030` 会将其规范化（§4.4）并报告 `converted`；从第二遍起才视为无变化。
 
 ---
 
@@ -404,7 +435,7 @@ JSON schema 见 `EXECUTION.md §12`。
 | 0  | 成功（`diff`：对比完成 —— 除非指定 `--fail-on-change`，差异不改变退出码）                                                                             |
 | 1  | 非致命单文件问题（`unknown`、`decode_error`、`encode_error`、`io_error`；convert 还包括 `fetch_error`、超限 `--url` 载荷）；`diff --fail-on-change`：两份报告存在差异 |
 | 2  | 所有命令的致命错误（参数错误、root 缺失、旗标冲突、I/O 初始化失败）；clap 也会产生；`diff`：输入报告缺失或格式错误                                    |
-| 3  | `verify` 发现白名单内非 UTF-8 文件；`fix`：任一文件未通过验证门禁（超限/不可读计为失败 —— fail-closed；门禁优先于转换侧问题）                         |
+| 3  | `verify` 发现白名单内非 UTF-8 文件（或无法检查树的一部分）；`fix`：任一文件未通过验证门禁（超限/不可读计为失败 —— fail-closed；门禁优先于转换侧问题）                         |
 
 ---
 

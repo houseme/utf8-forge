@@ -106,7 +106,12 @@ fn canonical_skip_set(skip: &[PathBuf]) -> Vec<PathBuf> {
             if let Ok(c) = std::fs::canonicalize(p) {
                 return Some(c);
             }
-            let parent = p.parent()?;
+            // A bare filename has no directory component; resolve it against
+            // the current directory so it still lands in the skip set.
+            let parent = match p.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+                _ => std::path::PathBuf::from("."),
+            };
             let parent_c = std::fs::canonicalize(parent).ok()?;
             let name = p.file_name()?;
             Some(parent_c.join(name))

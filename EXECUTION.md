@@ -152,6 +152,10 @@ utf8-forge convert ^
 - **Only changed files written** — `already_utf8` untouched (no mtime churn).
 - **Per-file error isolation** — one failure does not abort the batch.
 - **Replayable backup** — original bytes preserved under mirrored path.
+- **Report pre-flight** — the report path is validated before anything runs:
+  an unwritable report directory, a report path that is an existing directory,
+  an existing write-protected report file, or a report path equal to the
+  active ignore file is fatal (exit 2) with nothing touched.
 
 **Output**:
 
@@ -368,9 +372,11 @@ utf8-forge convert ^
 - `--dry-run` works with `--url`: fetches and reports, but does not write.
 - `--config` cannot be combined with `--url` — fatal (exit 2); fetch reads no
   config. The same `--report` pre-flight as tree modes (unwritable report
-  directory, or a report path that is an existing directory) runs **before**
-  the download, so a failure writes nothing; a decode error prints exactly one
-  stderr problem line (for the output path).
+  directory, an existing directory, a write-protected report file — the
+  ignore-file rule is tree-only, since fetch loads no ignore file) runs
+  **before** the download, so a failure
+  writes nothing; a decode error prints exactly one stderr problem line (for
+  the output path).
 - The size cap is enforced during download (an oversized payload aborts
   mid-stream).
 
@@ -385,6 +391,10 @@ utf8-forge convert ^
 ```
 
 > ⚠️ Do not use unless a legacy external dependency requires GBK.
+>
+> Content containing U+E5E5 is refused (exit 1); already-GB18030 files are
+> rewritten to their canonical WHATWG byte forms on the first pass (idempotent
+> from the second pass on).
 
 ---
 
@@ -394,7 +404,7 @@ utf8-forge convert ^
 |-----------------|---------------------------------|---------------------------------------------------|
 | `unknown`       | Not UTF-8 / UTF-16 / UTF-32 / GB18030 | Inspect hex; often a binary with a text extension |
 | `decode_error`  | Legal encoding, truncated bytes | Hex editor; ask original author                   |
-| `encode_error`  | Decodes cleanly but the target encoding would produce unreadable bytes (`utf-16le` + leading U+0000) | Pick another target or drop the leading NUL       |
+| `encode_error`  | Decodes cleanly but the target encoding would produce unreadable bytes (`utf-16le` + leading U+0000, `gb18030` + U+E5E5) | Pick another target, drop the leading NUL / the U+E5E5 character |
 | `too_large`     | > `--max-file-size`             | Usually skip; raise limit only if necessary       |
 | `io_error`      | Permission / locked file        | Close the locking process or fix ACLs             |
 | `fetch_error`   | `--url` network/TLS failure     | Check URL, proxy, timeout                         |
@@ -519,6 +529,7 @@ fetch report omits `root`; `options.exclude_ext` / `exclude_globs` /
 `backup_dir` are omitted when empty/none; `options.ignore_file` is omitted when
 no ignore rules are active; `options.config_file` is omitted without `--config`;
 `files[].detected` is omitted when the file was not read (unreadable or oversized);
+`warnings` is omitted when there are no walk/ignore warnings;
 `verify_failed_files` is omitted when the fix gate is clean.
 
 `options` reflects the post-config effective values (after merging
@@ -527,7 +538,7 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "mode": "convert",                     // scan | convert | verify | fetch | fix
   "root": "D:\\server",                  // omitted in fetch mode
   "url": "https://example.com/a.cpp",    // omitted without --url
@@ -572,8 +583,11 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
     "D:\\server\\GameServer\\Locked.cpp"
   ],
                                          // mode verify failures are listed only in verify_failed_files
-  "verify_failed_files": []              // fix mode only: paths whose verify record is failed;
+  "verify_failed_files": [],             // fix mode only: paths whose verify record is failed;
                                          // omitted when the gate is clean
+  "warnings": [                          // walk/ignore warnings (e.g. a directory the traversal
+    "walk warning at .\locked: Permission denied (os error 13)"
+  ]                                      // omitted when empty
 }
 ```
 
@@ -613,7 +627,7 @@ line always goes to stderr, so `diff … | jq .` works):
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "mode": "diff",
   "before": "apply2.json",               // --before value verbatim
   "after": "apply3.json",                // --after value verbatim

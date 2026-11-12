@@ -44,7 +44,7 @@ Playbook*.
 | `Utf32Le` | Starts with `FF FE 00 00` (`FF FE` prefix shared with UTF-16 LE; the next two bytes decide) | Same    |
 | `Utf16Le` | Starts with `FF FE` **not** followed by `00 00`                 | BOM stripped before decoding           |
 | `Utf16Be` | Starts with `FE FF`                                             | Same                                   |
-| `Gb18030` | UTF-8 strict fail → `GB18030.decode` with `had_errors == false` | Covers GB2312/GBK/GB18030              |
+| `Gb18030` | UTF-8 strict fail → `GB18030.decode_without_bom_handling` with `had_errors == false` | Covers GB2312/GBK/GB18030              |
 | `Unknown` | All above fail                                                  | Reported & skipped — **never guessed** |
 
 **Detection order is frozen**: UTF-8 BOM → UTF-32 BE BOM (`00 00 FE FF`) →
@@ -79,6 +79,20 @@ mis-read the file as UTF-32LE and corrupt it. The file is recorded as an
 `encode_errors` counter), exit 1; the original bytes are untouched.
 `--target utf-16be` is safe (`FE FF 00 00` re-reads as UTF-16BE) and
 unaffected.
+
+**GB18030 unmappable scalar & WHATWG canonicalization**: `--target gb18030`
+refuses content containing U+E5E5 — the single Unicode scalar WHATWG's gb18030
+encoder cannot map (a Private Use Area character that legacy files sometimes
+contain). The refusal pattern matches the NUL guard: the file is recorded as
+an `error` row with an `encode_error` reason (counted under the summary's
+`encode_errors` counter), exit 1; the original bytes are untouched. The
+WHATWG mappings are also canonical: a `--target gb18030` pass over
+already-GB18030 files rewrites legacy byte spellings into their canonical
+WHATWG forms (`0x80` → `A2 E3` for the euro sign, `A3 A0` → `A1 A1` for the
+ideographic space, and the 18 further scalars U+9FB4–U+9FBB and U+FE10–U+FE19
+— whose legacy spellings formerly encoded Private Use Area characters —
+consolidated onto their assigned equivalents) — byte-different but content-equivalent, and idempotent
+from the second pass on.
 
 **No UTF-32 target**: UTF-32 is read-only (detection + strict decode). A
 UTF-32 value on `--target` is rejected by clap (exit 2); `verify` fails
@@ -127,7 +141,7 @@ pub fn detect(bytes: &[u8]) -> DetectedEncoding {
     if std::str::from_utf8(bytes).is_ok() {
         return DetectedEncoding::Utf8;
     }
-    let (_, _, had_errors) = GB18030.decode(bytes);
+    let (_, had_errors) = GB18030.decode_without_bom_handling(bytes);
     if !had_errors {
         return DetectedEncoding::Gb18030;
     }
@@ -160,15 +174,15 @@ return TranscodeOutcome::Unchanged; // zero byte allocation
 | `Utf16Be` | `UTF_16BE.decode_without_bom_handling(&bytes[2..])`; reject on `had_errors` |
 | `Utf32Le` | Manual unit decode of `&bytes[4..]`; reject surrogates, values > `0x10FFFF`, and misaligned tails (length not a multiple of 4) |
 | `Utf32Be` | Same, big-endian units                                 |
-| `Gb18030` | `GB18030.decode(bytes)`; reject on `had_errors`        |
+| `Gb18030` | `GB18030.decode_without_bom_handling(bytes)`; reject on `had_errors` |
 | `Unknown` | `Err(UnknownEncoding)` — **no guessing**               |
 
 ### 4.3 Encode (BOM handling)
 
 ```rust
-fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
+fn encode(text: &str, target: TargetEncoding) -> Result<Vec<u8>, ForgeError> {
     match target {
-        TargetEncoding::Utf8 => text.as_bytes().to_vec(),
+        TargetEncoding::Utf8 => Ok(text.as_bytes().to_vec()),
         TargetEncoding::Utf8Bom => {
             let mut v = Vec::with_capacity(3 + text.len());
             v.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
@@ -176,6 +190,12 @@ fn encode(text: &str, target: TargetEncoding) -> Vec<u8> {
             v
         }
         TargetEncoding::Gb18030 => {
+            // WHATWG gb18030 mappings. The encoder itself refuses content
+            // containing U+E5E5 — the single Unicode scalar this encoder
+            // cannot map (`encode_error`, exit 1; see §2.2). Legacy GB18030
+            // byte spellings encode to the canonical WHATWG forms:
+            // byte-different, content-equivalent, idempotent from the second
+            // pass on.
             let (cow, _, _) = GB18030.encode(text);
             cow.into_owned()
         }
@@ -327,7 +347,7 @@ gates: `!` negation lifts only the ignore layer, never the whitelist /
 
 ```toml
 [filter]
-extensions        = ["h", "cpp"]   # replaces the default whitelist
+extensions        = ["h", "cpp"]   # replaces the default whitelist ([] = fatal)
 exclude_dirs      = ["legacy"]     # appended to the default excludes
 exclude_ext       = ["png"]
 exclude_globs     = ["**/Generated/**"]
@@ -337,7 +357,7 @@ include_hidden    = false
 
 [convert]
 target     = "utf-8"               # utf-8 | utf-8-bom | gb18030 | utf-16le | utf-16be
-backup_dir = "D:\\backup\\orig"
+backup_dir = "D:\\backup\\orig"    # empty string is fatal
 
 [options]
 max_file_size = 209715200
@@ -351,6 +371,9 @@ threads       = 8
   whitelist stays auditable.
 - Unknown keys, malformed TOML, and wrong types are **fatal exit 2**; messages
   carry the TOML line/column.
+- Value rules mirror the CLI: `[filter].extensions = []` (present but empty) is
+  **fatal exit 2**, while an absent key keeps the default whitelist;
+  `[convert].backup_dir = ""` is fatal and names the key.
 - Fetch mode reads no config: `--config` combined with `--url` is a fatal
   exit 2. Deliberately absent from the schema: `root`,
   `report`, `dry_run`, `url`, `output`, `quiet`, `verbose`, `ignore_file` —
@@ -501,7 +524,7 @@ fn derive_output_path(url: &str) -> PathBuf {
 
 ---
 
-## 9. CLI Interface (v0.1)
+## 9. CLI Interface
 
 ```text
 utf8-forge <COMMAND> [OPTIONS]
@@ -575,7 +598,7 @@ Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
 ```toml
 [package]
 name = "utf8-forge"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 
 [[bin]]
@@ -706,7 +729,7 @@ CI gates: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D 
 
 ---
 
-## 14. ADR (v0.1 Deltas)
+## 14. ADR Deltas
 
 | Decision         | Choice                      | Rationale                                             |
 |------------------|-----------------------------|-------------------------------------------------------|
@@ -719,5 +742,5 @@ CI gates: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D 
 
 ---
 
-*DESIGN.md v0.1 — All maintainers must read §11 before modifying code.*
+*DESIGN.md — All maintainers must read §11 before modifying code.*
 

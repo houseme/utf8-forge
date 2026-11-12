@@ -145,8 +145,11 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --all -- --check
 
-      - name: Clippy (all targets, -D warnings)
+      - name: Clippy (all targets, all features, -D warnings)
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Clippy (no default features, -D warnings)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
   # ── Documentation ───────────────────────────────────────────────────────────
 

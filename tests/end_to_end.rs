@@ -472,9 +472,20 @@ fn scan_exits_1_on_io_errors() {
     put(&root, "secret.cpp", GBK);
     fs::set_permissions(root.join("secret.cpp"), fs::Permissions::from_mode(0o000)).unwrap();
 
-    let code = run_tree(Commands::Scan, &args(&root, None));
+    let report = dir.path().join("r.json");
+    let code = run_tree(Commands::Scan, &args(&root, Some(&report)));
     fs::set_permissions(root.join("secret.cpp"), fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(code, 1, "io_error records must fail the scan");
+    let doc = read_report(&report);
+    let bad = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"].as_str().unwrap().ends_with("secret.cpp"))
+        .expect("the unreadable file must be recorded");
+    assert_eq!(bad["action"], "error");
+    assert!(bad["error"].as_str().unwrap().starts_with("io_error:"));
+    assert!(doc["summary"]["errors"].as_u64().unwrap() >= 1);
 }
 
 #[test]
@@ -1406,4 +1417,72 @@ fn non_utf8_filename_is_reported_lossily() {
     let path = doc["files"][0]["path"].as_str().unwrap();
     assert!(path.contains('\u{FFFD}'), "lossy path in {path:?}");
     assert_eq!(doc["files"][0]["detected"], "utf-8");
+}
+/// A whitelisted file inside a directory the traversal cannot enter must not
+/// slip past the gate: verify fails closed (exit 3), the warning survives
+/// --quiet in the report, and a clean tree stays exit 0.
+#[test]
+#[cfg(unix)]
+fn verify_gate_fails_closed_on_unreadable_subtree() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    let locked = root.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    put(&root, "top.cpp", b"plain");
+    put(&locked, "bom.cpp", &[0xEF, 0xBB, 0xBF, b'x']);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let report = dir.path().join("r.json");
+    let mut a = args(&root, Some(&report));
+    a.quiet = true;
+    let code = run_tree(Commands::Verify, &a);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 3, "an uninspectable subtree must fail the gate");
+    let doc = read_report(&report);
+    assert!(
+        !doc["warnings"].as_array().unwrap().is_empty(),
+        "the walk warning must reach the report even under -q"
+    );
+    // fix shares the gate semantics.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let code_fix = run_fix(&a, |c| c.dry_run = true);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code_fix, 3, "fix applies the same gate semantics");
+}
+
+/// A write-protected existing report file is refused at pre-flight instead
+/// of being silently replaced (and re-stamped read-only) by the rename.
+#[test]
+#[cfg(unix)]
+fn write_protected_report_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+    let report = dir.path().join("ro.json");
+    fs::write(&report, b"old").unwrap();
+    fs::set_permissions(&report, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let code = run_tree(Commands::Scan, &args(&root, Some(&report)));
+    assert_eq!(code, 2, "a read-only report must be a fatal pre-flight");
+    assert_eq!(fs::read(&report).unwrap(), b"old");
+    fs::set_permissions(&report, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The report target may never be the active ignore rule file.
+#[test]
+fn report_target_cannot_be_the_ignore_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    put(&root, "a.cpp", b"x");
+    let ignore = root.join(".utf8forgeignore");
+    fs::write(&ignore, "*.md\n").unwrap();
+    let before = fs::read(&ignore).unwrap();
+
+    let code = run_tree(Commands::Scan, &args(&root, Some(&ignore)));
+    assert_eq!(code, 2, "the ignore file must not become the report target");
+    assert_eq!(fs::read(&ignore).unwrap(), before);
 }

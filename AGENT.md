@@ -48,13 +48,15 @@ cargo build --release
 | `scan`          | Detect only; distribution report              |           ❌            | —                                                                  | 0 / 1 / 2* |
 | `convert`       | Detect + transcode + atomic write             | ✅ (unless `--dry-run`) | `--target/--dry-run/--backup-dir` are convert/fix-only             | 0 / 1 / 2* |
 | `convert --url` | Fetch → transcode → save                      |           ✅            | `--url/--output`; `--target/--dry-run` allowed, `--root` ignored   | 0 / 1 / 2* |
-| `verify`        | Assert all whitelisted files are UTF-8 no BOM |           ❌            | —                                                                  | 0 / 3 / 2* |
-| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target` (utf-8 only) / `--dry-run` / `--backup-dir`; no `--url/--output` | 0 / 3 / 1 / 2* |
+| `verify`        | Assert all whitelisted files are UTF-8 no BOM |           ❌            | —                                                                  | 0 / 3‡ / 2* |
+| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target` (utf-8 only) / `--dry-run` / `--backup-dir`; no `--url/--output` | 0 / 3‡ / 1 / 2* |
 | `diff`          | Compare two reports per path                  |           ❌            | `--before/--after/--report/--fail-on-change`; reads JSON, writes nothing else | 0 / 1† / 2* |
 
 \* `2` = fatal setup/parse errors (missing root, bad flags, conflicts); also emitted by clap. `scan` and `verify`
 **reject** the convert/fix-only flags `--target` / `--dry-run` / `--backup-dir` with exit 2.
 † `1` only with `--fail-on-change` on a non-empty diff; otherwise `diff` exits 0 even with differences.
+‡ `3` = the verify gate failed: non-UTF-8 files, oversized/unreadable files (fail-closed), or traversal could not
+inspect part of the tree; `fix` lists gate failures in `verify_failed_files`.
 
 ---
 
@@ -248,4 +250,4 @@ See `EXECUTION.md` for concrete steps.
 
 ---
 
-*AGENT.md v0.1 — The 10 invariants in §6 are non-negotiable.*
+*AGENT.md — The 10 invariants in §6 are non-negotiable.*

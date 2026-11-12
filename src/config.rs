@@ -49,8 +49,12 @@ pub struct ForgeConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilterSection {
+    /// Whitelist override. `None` = key absent (the default whitelist stays
+    /// in effect); `Some(list)` replaces it, and an empty list is a fatal
+    /// input error at merge time — silently scanning nothing is worse than a
+    /// loud failure.
     #[serde(default)]
-    pub extensions: Vec<String>,
+    pub extensions: Option<Vec<String>>,
     #[serde(default)]
     pub exclude_dirs: Vec<String>,
     #[serde(default)]
@@ -71,6 +75,8 @@ pub struct FilterSection {
 pub struct ConvertSection {
     #[serde(default)]
     pub target: Option<String>,
+    /// Backup directory override. An empty string is a fatal input error at
+    /// merge time — an unnamed directory can never be a usable target.
     #[serde(default)]
     pub backup_dir: Option<String>,
 }
@@ -136,7 +142,10 @@ threads = 4
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.filter.extensions, vec!["c", "cpp"]);
+        assert_eq!(
+            cfg.filter.extensions,
+            Some(vec!["c".to_string(), "cpp".to_string()])
+        );
         assert!(cfg.filter.include_rc);
         assert_eq!(cfg.options.max_file_size, Some(1024));
         assert_eq!(cfg.target().unwrap(), Some(TargetEncoding::Utf16Le));
@@ -145,7 +154,7 @@ threads = 4
     #[test]
     fn empty_document_is_valid() {
         let cfg: ForgeConfig = toml::from_str("").unwrap();
-        assert!(cfg.filter.extensions.is_empty());
+        assert!(cfg.filter.extensions.is_none());
         assert_eq!(cfg.target().unwrap(), None);
     }
 

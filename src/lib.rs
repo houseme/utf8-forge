@@ -12,10 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! utf8-forge orchestration: per-file pipelines, report assembly, and the
-//! `run()` entry point with exit-code mapping.
+//! `utf8-forge` — a focused, idempotent, bidirectional charset transcoder for
+//! source trees (default output: UTF-8 without BOM).
 //!
-//! Exit codes:
+//! This crate primarily ships the [`utf8-forge` CLI](cli::Cli); the library
+//! surface is public so integration tests and downstream pipelines can drive
+//! the same detection and transcoding machinery the binary uses. Detection is
+//! rule-based (BOM prefixes, then strict UTF-8, then strict GB18030) and
+//! never guesses; transcoding is strict on both ends, so mojibake is never
+//! written.
+//!
+//! ```rust
+//! use utf8_forge::detector::detect;
+//! use utf8_forge::transcoder::{TargetEncoding, transcode};
+//!
+//! let bytes = [0xEF, 0xBB, 0xBF, b'h', b'i'];
+//! assert_eq!(detect(&bytes).tag(), "utf-8-bom");
+//!
+//! let converted = transcode(&bytes, TargetEncoding::Utf8).unwrap();
+//! match converted {
+//!     utf8_forge::transcoder::TranscodeOutcome::Changed(out) => assert_eq!(out, b"hi"),
+//!     utf8_forge::transcoder::TranscodeOutcome::Unchanged => panic!("BOM must be stripped"),
+//! }
+//! ```
+//!
+//! # CLI orchestration
+//! Per-file pipelines, report assembly, and the [`run()`](fn@run) entry point
+//! with exit-code mapping:
 //! - `0` success
 //! - `1` non-fatal per-file issues (`unknown`, `decode_error`, `encode_error`,
 //!   `io_error`, `fetch_error`)
@@ -297,8 +320,6 @@ pub fn verify_file(path: &Path, max_file_size: u64) -> FileRecord {
 // Report assembly
 // ---------------------------------------------------------------------------
 
-/// Sort records by path (reports stay reproducible run to run), compute the
-/// mode-specific summary, and assemble the final report document.
 /// Run-level facts that flow into the report document unchanged.
 struct RunFacts {
     root: Option<std::path::PathBuf>,
@@ -306,8 +327,11 @@ struct RunFacts {
     options: OptionsBlock,
     started_at: String,
     verify_failed: Option<Vec<String>>,
+    warnings: Vec<String>,
 }
 
+/// Sort records by path (reports stay reproducible run to run), compute the
+/// mode-specific summary, and assemble the final report document.
 fn finalize_report(
     mode: &'static str,
     facts: RunFacts,
@@ -441,6 +465,7 @@ fn finalize_report(
         unknown_files,
         error_files,
         verify_failed_files: facts.verify_failed.unwrap_or_default(),
+        warnings: facts.warnings,
     }
 }
 
@@ -639,8 +664,15 @@ fn merge_tree_config(
         return Ok((None, crate::config::ForgeConfig::default()));
     };
     let cfg = crate::config::load(&path)?;
-    if common.ext.is_empty() {
-        common.ext = cfg.filter.extensions.clone();
+    if common.ext.is_empty()
+        && let Some(list) = &cfg.filter.extensions
+    {
+        // An explicitly empty whitelist would silently scan nothing — the
+        // same fatal-input rule as `--ext ""`.
+        if list.is_empty() {
+            bail!("config [filter].extensions is empty: no usable extensions");
+        }
+        common.ext = list.clone();
     }
     if common.exclude.is_empty() {
         common.exclude = cfg.filter.exclude_dirs.clone();
@@ -747,6 +779,11 @@ fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<Option
     if conv.backup_dir().is_none()
         && let Some(dir) = &cfg.convert.backup_dir
     {
+        // An empty directory name is a fatal input error: it is not a usable
+        // target anywhere, and the CLI form rejects it the same way.
+        if dir.trim().is_empty() {
+            bail!("config [convert].backup_dir is empty: name a real directory");
+        }
         conv.set_backup_dir(Some(std::path::PathBuf::from(dir)));
     }
     Ok(recorded)
@@ -829,10 +866,20 @@ fn check_backup_placement(dir: &Path, root_canonical: &Path) -> anyhow::Result<(
 /// any file is converted, and collect the canonical report path for
 /// traversal exclusion (`--report` inside the tree must not pollute later
 /// runs). A bare filename (no directory component) is probed against the
-/// current directory.
+/// current directory. An existing write-protected report file is refused:
+/// rename would silently bypass its permission bits (and re-stamp the new
+/// report read-only), but the operator locked that file on purpose.
 fn ensure_report_dir(report: &Path) -> anyhow::Result<()> {
     if report.is_dir() {
         bail!("--report `{}` is an existing directory", report.display());
+    }
+    if let Ok(meta) = fs::metadata(report)
+        && meta.permissions().readonly()
+    {
+        bail!(
+            "--report `{}` is write-protected (read-only); chmod +w to replace it",
+            report.display()
+        );
     }
     let parent = match report.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -844,6 +891,20 @@ fn ensure_report_dir(report: &Path) -> anyhow::Result<()> {
     // permissions — probe writability so an existing read-only report
     // directory also aborts before the tree is touched.
     ensure_writable_dir(&parent)?;
+    Ok(())
+}
+
+/// Refuse a report target that would overwrite the active ignore rule file —
+/// the operator's filters must never be replaced by report JSON.
+fn ensure_report_not_ignore(report: Option<&Path>, ignore: Option<&str>) -> anyhow::Result<()> {
+    if let (Some(report), Some(ignore)) = (report, ignore)
+        && report == std::path::Path::new(ignore)
+    {
+        bail!(
+            "--report `{}` would overwrite the ignore file; pick another report path",
+            report.display()
+        );
+    }
     Ok(())
 }
 
@@ -996,6 +1057,7 @@ fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
     print_header(console, format!("mode=scan root={}", args.root.display()));
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(&args)?;
+    ensure_report_not_ignore(args.report.as_deref(), ignore_recorded.as_deref())?;
     let mut warnings = Vec::new();
     let walk = {
         let skip = skip_paths(
@@ -1036,6 +1098,7 @@ fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
             ),
             started_at,
             verify_failed: None,
+            warnings,
         },
         records,
         elapsed,
@@ -1102,6 +1165,10 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     );
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(common)?;
+    ensure_report_not_ignore(common.report.as_deref(), ignore_recorded.as_deref())?;
+    // Ignore-layer problems stay advisory: a dropped ignore file only
+    // widens the walk, so the quiet contract applies to them.
+    print_warnings(&ignore_warnings, console);
     let mut warnings = ignore_warnings;
     let walk = {
         let skip = skip_paths(
@@ -1113,8 +1180,11 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
         );
         collect_files(&common.root, &filter, &skip, ignore.as_ref())
     };
+    let walk_warning_count = walk.warnings.len();
     warnings.extend(walk.warnings);
-    print_warnings(&warnings, console);
+    // Ignore-layer problems were already printed right after load_ignore;
+    // only the traversal warnings belong to this line.
+    print_warnings(&warnings[warnings.len() - walk_warning_count..], console);
     let ctx = ConvertCtx {
         root: common.root.clone(),
         target,
@@ -1147,6 +1217,7 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
             ),
             started_at,
             verify_failed: None,
+            warnings,
         },
         records,
         elapsed,
@@ -1186,6 +1257,10 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
     print_header(console, format!("mode=verify root={}", args.root.display()));
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(&args)?;
+    ensure_report_not_ignore(args.report.as_deref(), ignore_recorded.as_deref())?;
+    // Ignore-layer problems stay advisory: a dropped ignore file only
+    // widens the walk, so the quiet contract applies to them.
+    print_warnings(&ignore_warnings, console);
     let mut warnings = Vec::new();
     let walk = {
         let skip = skip_paths(
@@ -1199,8 +1274,14 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
         warnings.extend(ignore_warnings);
         walk
     };
+    let gate_warned = !walk.warnings.is_empty();
     warnings.extend(walk.warnings);
-    print_warnings(&warnings, console);
+    // A gate must not wave through what it could not inspect: only traversal
+    // warnings (an uninspectable subtree) fail the gate, and they are shown
+    // even under --quiet.
+    for w in warnings.iter().skip(warnings.len() - gate_warned as usize) {
+        print_problem(w.clone());
+    }
     let started_at = wall_now();
     let started = Instant::now();
     let records = with_pool(args.threads, || {
@@ -1226,6 +1307,7 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
             ),
             started_at,
             verify_failed: None,
+            warnings,
         },
         records,
         elapsed,
@@ -1244,7 +1326,11 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
         );
     }
     print_duration(args.report.as_deref(), elapsed, console);
-    Ok(if summary.failed > 0 { 3 } else { 0 })
+    Ok(if summary.failed > 0 || gate_warned {
+        3
+    } else {
+        0
+    })
 }
 
 /// `convert --url`: fetch → detect → transcode → save.
@@ -1433,6 +1519,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
             options,
             started_at,
             verify_failed: None,
+            warnings: Vec::new(),
         },
         vec![record],
         elapsed,
@@ -1510,6 +1597,10 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     );
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(common)?;
+    ensure_report_not_ignore(common.report.as_deref(), ignore_recorded.as_deref())?;
+    // Ignore-layer problems stay advisory: a dropped ignore file only
+    // widens the walk, so the quiet contract applies to them.
+    print_warnings(&ignore_warnings, console);
     let mut warnings = ignore_warnings;
     let walk = {
         let skip = skip_paths(
@@ -1518,8 +1609,13 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
         );
         collect_files(&common.root, &filter, &skip, ignore.as_ref())
     };
+    let gate_warned = !walk.warnings.is_empty();
     warnings.extend(walk.warnings);
-    print_warnings(&warnings, console);
+    // Gate modes surface traversal problems even under --quiet: an
+    // uninspectable subtree fails the gate below.
+    for w in warnings.iter().skip(warnings.len() - gate_warned as usize) {
+        print_problem(w.clone());
+    }
 
     let started_at = wall_now();
     let started = Instant::now();
@@ -1577,6 +1673,7 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
             ),
             started_at,
             verify_failed: Some(verify_failed.clone()),
+            warnings: warnings.clone(),
         },
         convert_records,
         elapsed,
@@ -1624,7 +1721,7 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     }
     print_duration(common.report.as_deref(), elapsed, console);
     // Gate wins: the exit code describes the end state of the tree.
-    Ok(if verify_failed_count > 0 {
+    Ok(if verify_failed_count > 0 || gate_warned {
         3
     } else if convert_issues > 0 {
         1

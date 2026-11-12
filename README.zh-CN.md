@@ -30,7 +30,8 @@
 - ✅ 识别并转换 **UTF-8 / UTF-8 BOM / UTF-16 LE / UTF-16 BE / GB18030**（UTF-32 LE/BE：仅识别与读取，不可作为写入目标）
 - ✅ 默认目标： **UTF-8 无 BOM**（Playbook 策略 A）
 - ✅ **双向**转换（GB18030 → UTF-8 → GB18030 字节无损；`--target utf-16le` 拒绝首字符为 U+0000 的内容 —— 其输出会与
-  UTF-32LE BOM 逐字节相同，永远无法再按 UTF-16 读取）
+  UTF-32LE BOM 逐字节相同，永远无法再按 UTF-16 读取；`--target gb18030` 拒绝包含 U+E5E5 的内容 —— 这是 WHATWG gb18030
+  编码器唯一无法映射的 Unicode 标量）
 - ✅ **幂等**：第二次运行改动 0 字节（双 BOM 输入需两次转换才收敛）
 - ✅ **白名单驱动递归** —— 绝不触碰 `dep/`、二进制、构建产物
 - ✅ gitignore 风格的 `.utf8forgeignore` 排除（自动发现）
