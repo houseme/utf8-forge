@@ -9,6 +9,14 @@
 
 ## Release record
 
+- **v0.2.3** released 2026-11-13: tag `v0.2.3` → Release workflow green
+  (build 5 platforms + crates.io publish + GitHub Release) → crates.io
+  `max_version: 0.2.3` → docs.rs build 200. Artifact smoke-tested on
+  aarch64-apple-darwin (sha256 verified, rollout loop passed incl. the
+  U+E5E5 gb18030 refusal and the threads bound). `AGENT.md` dropped from the
+  crate package per R9.8. This is the first tagged release since `v0.2.0`;
+  0.2.1/0.2.2 remain untagged intermediate versions documented in
+  `CHANGELOG.md`.
 - **v0.2.0** released 2026-11-05: tag `v0.2.0` → Release workflow green →
   GitHub Release with 5 platform archives (+ sha256) → crates.io `0.2.0` live →
   docs.rs build OK. Artifact smoke-tested on aarch64-apple-darwin (checksum
