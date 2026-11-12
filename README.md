@@ -29,7 +29,7 @@ Mixed-encoding source trees (GB18030 / UTF-8 / UTF-8 BOM / UTF-16) cause:
 
 - ✅ Detect and convert **UTF-8 / UTF-8 BOM / UTF-16 LE / UTF-16 BE / GB18030** (UTF-32 LE/BE: detect + read only — never a write target)
 - ✅ Default target: **UTF-8 without BOM** (Strategy A of the Playbook)
-- ✅ **Bidirectional** conversion (GB18030 → UTF-8 → GB18030 is byte-lossless; `--target utf-16le` refuses content whose
+- ✅ **Bidirectional** conversion (GB18030 → UTF-8 → GB18030 is byte-lossless except the documented WHATWG canonicalization of legacy GB18030 byte spellings — see USAGE §4.4; `--target utf-16le` refuses content whose
   first character is U+0000 — its output would be byte-identical to the UTF-32LE BOM and could never be re-read as
   UTF-16; `--target gb18030` refuses content containing U+E5E5 — the single Unicode scalar WHATWG's gb18030 encoder
   cannot map)

@@ -789,11 +789,20 @@ fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<Option
     Ok(recorded)
 }
 
-/// Root must be an existing directory, else exit code 2.
+/// Root must be an existing, resolvable directory, else exit code 2. The
+/// canonicalize check matters: traversal-exclusion and backup placement
+/// compare canonical paths, and a root that cannot be resolved (long-path or
+/// ACL edges on Windows, symlink loops) would silently disable those guards.
 fn ensure_root(root: &Path) -> anyhow::Result<()> {
     if !root.is_dir() {
         bail!("root `{}` is not an existing directory", root.display());
     }
+    fs::canonicalize(root).with_context(|| {
+        format!(
+            "cannot resolve the canonical path of root `{}`",
+            root.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -1081,7 +1090,6 @@ fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
             .map(|p| scan_file(p, args.effective_max_file_size()))
             .collect::<Vec<_>>()
     })?;
-    print_records(&records, console, None);
     let elapsed = started.elapsed();
 
     let report = finalize_report(
@@ -1113,6 +1121,9 @@ fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
     if let Some(path) = &args.report {
         write_report(&report, path)?;
     }
+    // The report is durable before any console output: a closed pipe
+    // (`... | head`) can kill the process mid-print without losing it.
+    print_records(&report.files, console, None);
     if let Summary::Scan(s) = &report.summary {
         print_scan_summary(s, args.report.as_deref(), elapsed, console);
     }
@@ -1200,7 +1211,6 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
             .map(|p| convert_file(p, &ctx))
             .collect::<Vec<_>>()
     })?;
-    print_records(&records, console, Some(target.tag()));
     let elapsed = started.elapsed();
 
     let report = finalize_report(
@@ -1229,6 +1239,8 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     if let Some(path) = &common.report {
         write_report(&report, path)?;
     }
+    // Report durable before console output (pipe-safe ordering).
+    print_records(&report.files, console, Some(target.tag()));
     print_convert_summary(&summary, common.report.as_deref(), elapsed, console);
     Ok(
         if summary.unknown > 0
@@ -1290,7 +1302,6 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
             .map(|p| verify_file(p, args.effective_max_file_size()))
             .collect::<Vec<_>>()
     })?;
-    print_records(&records, console, None);
     let elapsed = started.elapsed();
 
     let report = finalize_report(
@@ -1319,6 +1330,8 @@ fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
     if let Some(path) = &args.report {
         write_report(&report, path)?;
     }
+    // Report durable before console output (pipe-safe ordering).
+    print_records(&report.files, console, None);
     if !console.quiet {
         println!(
             "[utf8-forge] checked={}  passed={}  failed={}",
@@ -1528,10 +1541,11 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
         Summary::Convert(s) => s.clone(),
         _ => ConvertSummary::default(),
     };
-    print_records(&report.files, console, Some(args.target_or_default().tag()));
     if let Some(path) = &common.report {
         write_report(&report, path)?;
     }
+    // Report durable before console output (pipe-safe ordering).
+    print_records(&report.files, console, Some(args.target_or_default().tag()));
     print_convert_summary(&summary, common.report.as_deref(), elapsed, console);
     // Unlike tree mode, an oversized payload fails the run: the single file
     // the user asked to save was not written.
@@ -1632,7 +1646,6 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
             .map(|p| convert_file(p, &ctx))
             .collect::<Vec<_>>()
     })?;
-    print_records(&convert_records, console, Some(target.tag()));
 
     // Verify pass over the SAME traversal — no re-walk, so both passes see an
     // identical candidate list.
@@ -1695,6 +1708,10 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     if let Some(path) = &common.report {
         write_report(&report, path)?;
     }
+    // Report durable before console output (pipe-safe ordering). The fix
+    // summary already carries the gate lines; per-file convert rows print
+    // here alongside them.
+    print_records(&report.files, console, Some(target.tag()));
     if let Summary::Fix(f) = &report.summary
         && !console.quiet
     {

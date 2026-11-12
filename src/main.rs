@@ -19,6 +19,14 @@ use clap::Parser;
 use utf8_forge::{cli::Cli, run};
 
 fn main() {
+    // Restore SIGPIPE's default disposition: Rust ignores the signal, which
+    // turns a closed pipe (`... | head`) into an EPIPE panic inside
+    // `println!` (exit 101 with a panic backtrace). The Unix convention is a
+    // silent kill on SIGPIPE, which shell pipelines expect.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     std::process::exit(run(cli));
 }

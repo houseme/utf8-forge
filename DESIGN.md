@@ -15,7 +15,7 @@ Playbook*.
 |----|----------------------------------------------------------------|--------------------------------------------|
 | G1 | Default output **UTF-8 without BOM**                           | Byte-level verification on every `convert` |
 | G2 | **Idempotent**: second run changes 0 bytes                     | `converted == 0` on re-run                 |
-| G3 | **Lossless round-trip** across all supported encodings         | `A→B→A == A` in unit tests                 |
+| G3 | **Lossless round-trip** across all supported encodings         | `A→B→A == A` in unit tests; legacy GB18030 spellings are the documented §2.2/§4.4 exception (canonicalized, content-equivalent) |
 | G4 | **Whitelist-driven recursion** (never touch binaries / `dep/`) | `dry-run` audit passes                     |
 | G5 | **Atomic writes** (crash-safe)                                 | Temp file + `rename`                       |
 | G6 | **Optional remote download** → transcode → save                | `--url` flag works for HTTP/HTTPS          |
@@ -463,6 +463,7 @@ utf8-forge convert --url <URL> --output <PATH> [--target utf-8] [--report out.js
 |-----------------------------|-----------------|------------------------------------------------------------------------------------|
 | `Content-Length` pre-check  | When present    | Oversized responses rejected before the body is read                               |
 | Streaming (current)         | Always          | 8 KiB `Read` loop into a unique temp file; cap enforced per chunk                   |
+| Tree modes (convert/fix)    | Per file        | Whole file buffered: ≈ `max_file_size` × worker threads worst case (measured ~1 GiB at 5 × 190 MiB with `--threads 8`) |
 
 The download streams into an exclusively created read/write temporary file
 with per-chunk cap enforcement (`--max-file-size`, default 200 MiB). The chunk
@@ -478,7 +479,16 @@ collision preserves the existing path. Temporary names use
 
 - `redirect::Policy::limited(5)`
 - `danger_accept_invalid_certs(false)` (default; configurable via future flag)
-- Timeout 30 s (connect) / 120 s (total)
+- Timeout 30 s (connect); the whole download must finish within a 120 s
+  wall-clock budget enforced by the streaming loop (the client timeout fires
+  per read, so a slow trickle would otherwise never trip it)
+- Proxies: environment and system proxies are honored (even for loopback
+  addresses); use `NO_PROXY` to exempt hosts, and note that proxy failures
+  surface as fetch errors without proxy attribution
+- `Content-Encoding` is never decompressed (no compression features) — a
+  server that compresses unsolicited fails detection as `unknown`
+- Redirects (max 5) never change the derived output filename; use `--output`
+  when a redirect renames the resource
 
 ### 8.5 Security Notes
 
@@ -598,7 +608,7 @@ Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
 ```toml
 [package]
 name = "utf8-forge"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 
 [[bin]]
@@ -719,7 +729,8 @@ in `src/`.
 | `transcode(Utf8, Utf8)`                                 | `Unchanged` (fast path)         |
 | `transcode(Utf8Bom, Utf8)` twice                        | 2nd `Unchanged` (idempotent)    |
 | `transcode(GBK "你好", Utf8)` → `transcode(…, Gb18030)` | Bytes identical to original GBK |
-| `filter`: `foo.PNG`                                     | Not whitelisted                 |
+| `filter`: `foo.CPP`                                     | Whitelisted (case-insensitive)  |
+| `filter`: `logo.png`                                    | Not whitelisted (absent)        |
 | `filter`: `dep/`                                        | Pruned                          |
 | `fetch`: mock HTTP server returns GBK                   | Transcodes to UTF-8             |
 | `fetch`: oversized response                             | `Err(too_large)`                |

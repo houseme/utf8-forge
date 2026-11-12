@@ -28,14 +28,20 @@ use std::time::Duration;
 use crate::error::ForgeError;
 use crate::writer::unique_suffix;
 
+/// Wall-clock budget for the whole download body. The client timeout fires
+/// per read, so a slow-but-steady trickle would otherwise never trip it.
+const DOWNLOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Fetch `url`, capped by `max_size`, streaming the body to a temp file.
 ///
 /// `Content-Length` is checked before reading when present; the cap is then
 /// enforced per chunk while streaming, so an oversized body is aborted
 /// mid-download (temp deleted) instead of being buffered in full. At most
 /// `max_size` bytes are ever held in memory (the final read-back). Redirects
-/// are limited to 5; connect timeout is 30 s and the total request timeout
-/// is 120 s.
+/// are limited to 5; the connect timeout is 30 s and the whole download must
+/// finish within a 120 s wall-clock budget (enforced here, because the
+/// client's timeout applies per read). Bodyless success responses
+/// (204/304/3xx without a location) are refused.
 pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -58,6 +64,20 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
             size: len,
             max: max_size,
         });
+    }
+
+    // A bodyless success carries no content to transcode — materializing it
+    // would silently truncate the output with a zero-byte file. reqwest only
+    // rejects 4xx/5xx, and a 3xx without a Location header lands here as a
+    // final response.
+    let status = resp.status();
+    if status.is_redirection()
+        || status == reqwest::StatusCode::NO_CONTENT
+        || status == reqwest::StatusCode::NOT_MODIFIED
+    {
+        return Err(ForgeError::Fetch(format!(
+            "response has no body (HTTP {status}); nothing to fetch"
+        )));
     }
 
     // Stream the body into a unique temp file, enforcing the cap per chunk:
@@ -86,9 +106,19 @@ fn read_body_to_temp(
         // removal. Reading back through this handle avoids reopening a path
         // that another process could have replaced after creation.
         let mut file = file;
+        let started = std::time::Instant::now();
         let mut total: u64 = 0;
         let mut buf = [0u8; 8192];
         loop {
+            // The client timeout fires per read (a slow-but-steady trickle
+            // never trips it), so the tool enforces its own wall-clock
+            // budget on the whole body.
+            if started.elapsed() > DOWNLOAD_BUDGET {
+                return Err(ForgeError::Fetch(format!(
+                    "download exceeded the {} s budget",
+                    DOWNLOAD_BUDGET.as_secs()
+                )));
+            }
             let n = reader
                 .read(&mut buf)
                 .map_err(|e| ForgeError::Fetch(format!("read body failed: {e}")))?;

@@ -117,7 +117,8 @@ Exit codes:
 - `0` — conversion ran and every file passed the verify gate.
 - `3` — the gate wins: any file fails the verify pass, or traversal could not
   inspect part of the tree (not UTF-8 without BOM, `unknown`, oversized,
-  unreadable — all fail closed). The report carries `verify_failed_files`;
+  unreadable — all fail closed). When a file failed, the report carries
+  `verify_failed_files`; a warning-only gate failure exits 3 without it, and
   the walk warning prints to stderr even under `--quiet`.
 - `1` — convert-side issues (`unknown` / `decode_error` / `encode_error` /
   `io_error`) with no verify failure.
@@ -451,7 +452,8 @@ Key fields:
   in both; in fix mode verify failures are listed only in
   `verify_failed_files`).
 - `verify_failed_files` — fix mode only: paths whose verify record is `failed`;
-  omitted when the gate is clean.
+  omitted unless a file actually failed (a warning-only gate failure exits 3
+  without it).
 - `warnings` — top-level string array of walk/ignore warnings (e.g. a directory
   the traversal could not enter, an unreadable ignore file); omitted when empty.
 - `options.ignore_file` — ignore rules in effect (explicit path verbatim, or

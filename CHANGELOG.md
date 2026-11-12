@@ -7,6 +7,31 @@ CLI, so entries marked **lib-visible** affect downstream Rust consumers.
 Pre-1.0 releases may change the library API between patch versions — every
 such change is listed explicitly.
 
+## [0.2.4] — unreleased
+
+### Fixed
+
+- A closed pipe (`… | head`) no longer panics with `failed printing to
+  stdout` (exit 101): SIGPIPE keeps its default disposition on Unix, and the
+  JSON report is written before any console output, so a pipe cut can no
+  longer drop `--report`.
+- Fetch refuses bodyless success responses (204/304/3xx without a location)
+  as `fetch_error` instead of silently writing a zero-byte output (which
+  truncated an existing destination with exit 0).
+- The whole download must finish within a 120 s wall-clock budget enforced
+  by the streaming loop (the client timeout only applies per read, so a
+  slow-but-steady trickle could run indefinitely).
+- A root directory whose canonical path cannot be resolved is a fatal input
+  error (previously it silently disabled report-exclusion and backup
+  placement guards).
+
+### Added
+
+- Documentation for the fetch environment: proxy handling (`NO_PROXY`
+  guidance), non-decompressed `Content-Encoding` behavior, redirect naming,
+  and the tree-mode memory envelope (≈ `--max-file-size` × worker threads).
+- `CHANGELOG.md` now ships in the published crate.
+
 ## [0.2.3] — 2026-11-13 (tag `v0.2.3`; published to crates.io)
 
 ### Fixed
@@ -39,6 +64,8 @@ such change is listed explicitly.
 
 ### Changed
 
+- **lib-visible (breaking)**: `encode()` now returns
+  `Result<Vec<u8>, ForgeError>` (paired with the gb18030 refusal above).
 - **lib-visible (breaking)**: `FilterSection.extensions` is now
   `Option<Vec<String>>` — `None` means the key is absent. Struct literals
   need `Some(...)` / `None`.
@@ -63,17 +90,6 @@ such change is listed explicitly.
   `python3` alias); release/clippy workflow hygiene (dead variable, step
   names, advisory-SARIF annotation).
 
-### Changed
-
-- **lib-visible (breaking)**: `DiffInput.files` deserialization no longer
-  defaults — reports without a `files` array are rejected (`diff` exits 2)
-  instead of behaving like an empty baseline.
-- **lib-visible (breaking)**: `DiffReport` gained `before_root` / `after_root`
-  (`Option<String>`; omitted from JSON when absent).
-- `diff` compares paths relative to each report's `root` (identical trees
-  under different roots diff clean); the summary line moved to stderr so
-  stdout stays pipeable.
-
 ## [0.2.1] — 2026-11-06 (unreleased: committed to `main`, not tagged or published)
 
 ### Fixed
@@ -86,16 +102,20 @@ such change is listed explicitly.
 - `fix` accepts only the default target `utf-8` (the verify gate asserts
   UTF-8 without BOM); other targets are a fatal exit 2.
 - `diff` hardening: inputs must be real utf8-forge reports (a `files[]`
-  array), record paths compare relative to each report's root, and the
-  summary line moved to stderr; plus the full adversarial-review fix wave
-  (fetch pre-flight, per-subcommand flag surfaces, report and config
+  array — **lib-visible (breaking)**: `DiffInput.files` deserialization no
+  longer defaults), record paths compare relative to each report's root
+  (**lib-visible (breaking)**: `DiffReport` gained `before_root` /
+  `after_root`, omitted from JSON when absent), and the summary line moved
+  to stderr so stdout stays pipeable; plus the full adversarial-review fix
+  wave (fetch pre-flight, per-subcommand flag surfaces, report and config
   strictness) recorded in `ROADMAP.md`.
 
 ### Added
 
 - **lib-visible (breaking)**: `ForgeError::EncodeError(String)` variant with
-  the `encode_error` report category; `encode()` now returns
-  `Result<Vec<u8>, ForgeError>` (0.2.3).
+  the `encode_error` report category. (The follow-up signature change —
+  `encode()` returning `Result<Vec<u8>, ForgeError>` — is listed under
+  0.2.3, where it landed.)
 - **lib-visible (breaking)**: `IgnoreFile::len` / `IgnoreFile::is_empty`
   removed (dead code with no callers).
 - Summary `encode_errors` counter in the convert/fetch/fix summaries.

@@ -108,7 +108,8 @@ utf8-forge fix --root D:\server --dry-run
 - `0` —— 转换完成且所有文件通过验证门禁；
 - `3` —— 门禁优先：任一文件未通过验证，或遍历无法检查树的一部分（不是无 BOM 的
   UTF-8、`unknown`、超限、不可读 —— 全部 fail-closed）。报告中带
-  `verify_failed_files`；即使指定 `--quiet`，遍历警告仍会打印到 stderr；
+  文件失败时报告携带 `verify_failed_files`；仅有警告的门禁失败同样以 exit 3
+  结束但不携带该字段；即使指定 `--quiet`，遍历警告仍会打印到 stderr；
 - `1` —— 仅有转换侧问题（`unknown` / `decode_error` / `encode_error` / `io_error`），且无验证失败；
 - `2` —— 致命（参数错误、root 缺失、`--backup-dir` 位于 `--root` 内、非 `utf-8` 的 `--target`）。
 
@@ -408,7 +409,7 @@ JSON schema 见 `EXECUTION.md §12`。
   `skipped_unknown` | `skipped_too_large` | `error`；
 - `unknown_files` —— 检测为 `unknown`（任何模式）或 convert、fetch、fix 中的 `skipped_unknown`；`error_files` —— action 为 `error` 或
   verify `failed`（同一文件可能同时出现在两者中；fix 模式下 verify 失败仅记录在 `verify_failed_files` 中）；
-- `verify_failed_files` —— 仅 fix 模式：verify 记录为 `failed` 的路径；门禁干净时省略；
+- `verify_failed_files` —— 仅 fix 模式：verify 记录为 `failed` 的路径；仅在有文件实际失败时携带（仅有警告的门禁失败以 exit 3 结束但不携带）；
 - `warnings` —— 顶层字符串数组，携带遍历/ignore 警告（例如无法进入的目录、不可读
   的 ignore 文件）；为空时省略；
 - `options.ignore_file` —— 生效的 ignore 规则（显式路径原样记录，或自动发现的 `<root>/.utf8forgeignore`）；无规则生效时省略；

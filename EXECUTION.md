@@ -530,7 +530,8 @@ fetch report omits `root`; `options.exclude_ext` / `exclude_globs` /
 no ignore rules are active; `options.config_file` is omitted without `--config`;
 `files[].detected` is omitted when the file was not read (unreadable or oversized);
 `warnings` is omitted when there are no walk/ignore warnings;
-`verify_failed_files` is omitted when the fix gate is clean.
+`verify_failed_files` is omitted unless a file's verify record actually
+failed (a warning-only gate failure exits 3 without it).
 
 `options` reflects the post-config effective values (after merging
 `--config`); `config_file` records the `--config` value verbatim.
@@ -538,7 +539,7 @@ no ignore rules are active; `options.config_file` is omitted without `--config`;
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "mode": "convert",                     // scan | convert | verify | fetch | fix
   "root": "D:\\server",                  // omitted in fetch mode
   "url": "https://example.com/a.cpp",    // omitted without --url
@@ -627,7 +628,7 @@ line always goes to stderr, so `diff … | jq .` works):
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "mode": "diff",
   "before": "apply2.json",               // --before value verbatim
   "after": "apply3.json",                // --after value verbatim

@@ -1611,11 +1611,12 @@ dependencies = [
 
 [[package]]
 name = "utf8-forge"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
  "encoding_rs",
+ "libc",
  "rayon",
  "reqwest",
  "serde",
