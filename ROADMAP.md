@@ -9,6 +9,11 @@
 
 ## Release record
 
+- **v0.2.4** released 2026-11-13: tag `v0.2.4` at `e817262` → Release workflow
+  green (5 platforms + crates.io publish + GitHub Release, 10 assets) →
+  crates.io `max_version: 0.2.4` → docs.rs build 200. Artifact smoke on
+  aarch64-apple-darwin passed (sha256 verified; pipe safety `scan -v | head`
+  silent with the report intact; rollout loop clean).
 - **v0.2.3** released 2026-11-13: tag `v0.2.3` → Release workflow green
   (build 5 platforms + crates.io publish + GitHub Release) → crates.io
   `max_version: 0.2.3` → docs.rs build 200. Artifact smoke-tested on

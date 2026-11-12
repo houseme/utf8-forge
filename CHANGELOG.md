@@ -7,7 +7,7 @@ CLI, so entries marked **lib-visible** affect downstream Rust consumers.
 Pre-1.0 releases may change the library API between patch versions — every
 such change is listed explicitly.
 
-## [0.2.4] — unreleased
+## [0.2.4] — 2026-11-13 (tag `v0.2.4`; published to crates.io)
 
 ### Fixed
 
