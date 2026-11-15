@@ -28,6 +28,20 @@ use std::time::Duration;
 use crate::error::ForgeError;
 use crate::writer::unique_suffix;
 
+/// Render an error with its root cause appended: in CI the fetch error line
+/// is the only diagnostic, so `connection refused` or `dns error` must
+/// survive alongside the reqwest wrapper text.
+fn err_chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        text.push_str(": ");
+        text.push_str(&c.to_string());
+        cause = c.source();
+    }
+    text
+}
+
 /// Wall-clock budget for the whole download body. The client timeout fires
 /// per read, so a slow-but-steady trickle would otherwise never trip it.
 const DOWNLOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
@@ -53,9 +67,14 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
     let mut resp = client
         .get(url)
         .send()
-        .map_err(|e| ForgeError::Fetch(format!("request failed: {e}")))?
+        .map_err(|e| {
+            ForgeError::Fetch(format!(
+                "request failed: {} (network down, DNS, or proxy? check HTTP_PROXY/NO_PROXY)",
+                err_chain(&e)
+            ))
+        })?
         .error_for_status()
-        .map_err(|e| ForgeError::Fetch(format!("http status: {e}")))?;
+        .map_err(|e| ForgeError::Fetch(format!("http status: {}", err_chain(&e))))?;
 
     if let Some(len) = resp.content_length()
         && len > max_size
@@ -121,7 +140,7 @@ fn read_body_to_temp(
             }
             let n = reader
                 .read(&mut buf)
-                .map_err(|e| ForgeError::Fetch(format!("read body failed: {e}")))?;
+                .map_err(|e| ForgeError::Fetch(format!("read body failed: {}", err_chain(&e))))?;
             if n == 0 {
                 break;
             }

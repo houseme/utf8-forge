@@ -24,17 +24,26 @@
 //!
 //! ```rust
 //! use utf8_forge::detector::detect;
-//! use utf8_forge::transcoder::{TargetEncoding, transcode};
+//! use utf8_forge::transcoder::{TargetEncoding, transcode_detected};
 //!
 //! let bytes = [0xEF, 0xBB, 0xBF, b'h', b'i'];
-//! assert_eq!(detect(&bytes).tag(), "utf-8-bom");
+//! let detected = detect(&bytes);
+//! assert_eq!(detected.tag(), "utf-8-bom");
 //!
-//! let converted = transcode(&bytes, TargetEncoding::Utf8).unwrap();
+//! // transcode_detected avoids the second sniff that transcode() would do.
+//! let converted = transcode_detected(&bytes, detected, TargetEncoding::Utf8).unwrap();
 //! match converted {
 //!     utf8_forge::transcoder::TranscodeOutcome::Changed(out) => assert_eq!(out, b"hi"),
 //!     utf8_forge::transcoder::TranscodeOutcome::Unchanged => panic!("BOM must be stripped"),
 //! }
 //! ```
+//!
+//! # Feature flags
+//!
+//! - `remote` (default): pulls in the blocking HTTP client for
+//!   `convert --url`; building with `default-features = false` drops that
+//!   dependency stack entirely and turns `--url` into a documented fatal
+//!   error. Everything else works identically.
 //!
 //! # CLI orchestration
 //! Per-file pipelines, report assembly, and the [`run()`](fn@run) entry point
@@ -138,8 +147,8 @@ impl<'a> RecBuilder<'a> {
     ) -> FileRecord {
         FileRecord {
             path: self.path.to_string_lossy().into_owned(),
-            detected,
-            action,
+            detected: detected.map(str::to_string),
+            action: action.to_string(),
             bytes_before,
             bytes_after,
             duration_us: self.started.elapsed().as_micros() as u64,
@@ -354,7 +363,7 @@ fn finalize_report(
                 if r.action == "error" {
                     s.errors += 1;
                 }
-                match r.detected {
+                match r.detected.as_deref() {
                     Some("utf-8") => s.utf8 += 1,
                     Some("utf-8-bom") => s.utf8_bom += 1,
                     Some("utf-16le") => s.utf16le += 1,
@@ -388,7 +397,7 @@ fn finalize_report(
                 if r.action == "skipped_too_large" {
                     s.too_large += 1;
                 }
-                match r.action {
+                match r.action.as_str() {
                     "unchanged" => s.already_utf8 += 1,
                     "converted" | "would_convert" => s.converted += 1,
                     "skipped_unknown" => s.unknown += 1,
@@ -414,7 +423,7 @@ fn finalize_report(
                 ..ConvertSummary::default()
             };
             for r in &records {
-                match r.action {
+                match r.action.as_str() {
                     "unchanged" => s.already_utf8 += 1,
                     "converted" | "would_convert" => s.converted += 1,
                     "skipped_unknown" => s.unknown += 1,
@@ -441,7 +450,7 @@ fn finalize_report(
 
     let unknown_files: Vec<String> = records
         .iter()
-        .filter(|r| r.action == "skipped_unknown" || r.detected == Some("unknown"))
+        .filter(|r| r.action == "skipped_unknown" || r.detected.as_deref() == Some("unknown"))
         .map(|r| r.path.clone())
         .collect();
     let error_files: Vec<String> = records
@@ -452,9 +461,9 @@ fn finalize_report(
     // Fix mode's verify gate; empty (and omitted) in every other mode.
 
     Report {
-        tool: "utf8-forge",
-        version: env!("CARGO_PKG_VERSION"),
-        mode,
+        tool: "utf8-forge".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        mode: mode.into(),
         root: facts.root.map(|p| p.to_string_lossy().into_owned()),
         url: facts.url,
         started_at: facts.started_at,
@@ -485,7 +494,9 @@ fn options_block(
     let mut exclude_ext: Vec<String> = args.exclude_ext.clone();
     exclude_ext.sort();
     OptionsBlock {
-        target: conv.map(|c| c.effective_target()).unwrap_or("utf-8"),
+        target: conv
+            .map(|c| c.effective_target().to_string())
+            .unwrap_or_else(|| "utf-8".to_string()),
         dry_run: conv.is_some_and(|c| c.is_dry_run()),
         extensions,
         exclude_dirs,
@@ -508,7 +519,7 @@ fn options_block(
 /// verbose lines carry no target.
 fn print_records(records: &[FileRecord], console: ConsoleCfg, target_tag: Option<&'static str>) {
     for r in records {
-        match r.action {
+        match r.action.as_str() {
             "error" => print_problem(format!(
                 "error {} ({})",
                 r.path,
@@ -518,27 +529,31 @@ fn print_records(records: &[FileRecord], console: ConsoleCfg, target_tag: Option
             // Scan records unknown files as `detected` with the `unknown` tag;
             // they are still per-file issues (scan exits 1) and get the same
             // stderr line as `skipped_unknown` in the other modes.
-            "detected" if r.detected == Some("unknown") => {
+            "detected" if r.detected.as_deref() == Some("unknown") => {
                 print_problem(format!("unknown {}", r.path))
             }
             "failed" => {
-                let reason = r
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| format!("detected={}", r.detected.unwrap_or("?")));
+                let reason = r.error.clone().unwrap_or_else(|| {
+                    format!("detected={}", r.detected.as_deref().unwrap_or("?"))
+                });
                 print_problem(format!("failed {} ({reason})", r.path));
             }
             _ => {}
         }
-        match r.action {
+        match r.action.as_str() {
             // Unknown files already got their stderr problem line; the
             // verbose classification line would repeat it verbatim under -v.
-            "detected" if r.detected != Some("unknown") => {
-                print_verbose(console, format!("{} {}", r.detected.unwrap_or("?"), r.path))
-            }
+            "detected" if r.detected.as_deref() != Some("unknown") => print_verbose(
+                console,
+                format!("{} {}", r.detected.as_deref().unwrap_or("?"), r.path),
+            ),
             "unchanged" => print_verbose(
                 console,
-                format!("unchanged {} ({})", r.path, r.detected.unwrap_or("?")),
+                format!(
+                    "unchanged {} ({})",
+                    r.path,
+                    r.detected.as_deref().unwrap_or("?")
+                ),
             ),
             "converted" | "would_convert" => print_verbose(
                 console,
@@ -546,7 +561,7 @@ fn print_records(records: &[FileRecord], console: ConsoleCfg, target_tag: Option
                     "{} {} ({} → {}, {} → {} bytes)",
                     r.action,
                     r.path,
-                    r.detected.unwrap_or("?"),
+                    r.detected.as_deref().unwrap_or("?"),
                     target_tag.unwrap_or("?"),
                     r.bytes_before.unwrap_or(0),
                     r.bytes_after.unwrap_or(0)
@@ -639,17 +654,22 @@ fn print_scan_summary(
 // ---------------------------------------------------------------------------
 
 /// Build the effective filter; conflicting flags / bad globs are fatal.
-fn build_filter(args: &TreeArgs) -> anyhow::Result<FilterConfig> {
+/// `ext_source` names where the extension list came from (`--ext` or the
+/// config key) so invalid values are attributed to the right layer.
+fn build_filter(args: &TreeArgs, ext_source: &str) -> anyhow::Result<FilterConfig> {
     let opts = FilterOptions {
         ext_override: args.ext.clone(),
         exclude_ext: args.exclude_ext.clone(),
         exclude_dirs: args.exclude.clone(),
+        // No CLI surface for un-excluding defaults yet; lib consumers can
+        // pass Some(...) to replace the default set.
+        exclude_dirs_override: None,
         exclude_globs: args.exclude_glob.clone(),
         include_rc: args.include_rc,
         include_msbuild: args.include_msbuild,
         include_hidden: args.include_hidden,
     };
-    FilterConfig::build(&opts).map_err(anyhow::Error::msg)
+    FilterConfig::build(&opts, ext_source).map_err(anyhow::Error::msg)
 }
 
 /// Load the TOML config (no-op default when `--config` absent) and merge it
@@ -659,11 +679,12 @@ fn build_filter(args: &TreeArgs) -> anyhow::Result<FilterConfig> {
 /// resolved values. Returns the parsed config for conversion-option merging.
 fn merge_tree_config(
     common: &mut TreeArgs,
-) -> anyhow::Result<(Option<String>, crate::config::ForgeConfig)> {
+) -> anyhow::Result<(Option<String>, crate::config::ForgeConfig, bool)> {
     let Some(path) = common.config.clone() else {
-        return Ok((None, crate::config::ForgeConfig::default()));
+        return Ok((None, crate::config::ForgeConfig::default(), false));
     };
     let cfg = crate::config::load(&path)?;
+    let mut ext_from_config = false;
     if common.ext.is_empty()
         && let Some(list) = &cfg.filter.extensions
     {
@@ -673,6 +694,7 @@ fn merge_tree_config(
             bail!("config [filter].extensions is empty: no usable extensions");
         }
         common.ext = list.clone();
+        ext_from_config = true;
     }
     if common.exclude.is_empty() {
         common.exclude = cfg.filter.exclude_dirs.clone();
@@ -696,7 +718,11 @@ fn merge_tree_config(
     // an invalid value is always a loud, key-naming error instead of being
     // silently dropped by scan/verify.
     cfg.target()?;
-    Ok((Some(path.to_string_lossy().into_owned()), cfg))
+    Ok((
+        Some(path.to_string_lossy().into_owned()),
+        cfg,
+        ext_from_config,
+    ))
 }
 
 /// Conversion-option surface shared by `convert` and `fix`, so the
@@ -769,8 +795,8 @@ impl ConvertOptions for FixArgs {
 /// Apply the tree merge plus the `[convert]` section (convert / fix).
 /// CLI flags win over config values; runs before any pre-flight. Both
 /// sections use the same parsed snapshot of the file.
-fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<Option<String>> {
-    let (recorded, cfg) = merge_tree_config(conv.common_mut())?;
+fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<(Option<String>, bool)> {
+    let (recorded, cfg, ext_from_config) = merge_tree_config(conv.common_mut())?;
     if conv.target().is_none()
         && let Some(t) = cfg.target()?
     {
@@ -786,7 +812,7 @@ fn merge_convert_config(conv: &mut impl ConvertOptions) -> anyhow::Result<Option
         }
         conv.set_backup_dir(Some(std::path::PathBuf::from(dir)));
     }
-    Ok(recorded)
+    Ok((recorded, ext_from_config))
 }
 
 /// Root must be an existing, resolvable directory, else exit code 2. The
@@ -1056,14 +1082,19 @@ fn print_warnings(warnings: &[String], console: ConsoleCfg) {
 /// errored (I/O), matching the documented per-file issue contract.
 fn cmd_scan(args: &TreeArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let (config_file, _) = merge_tree_config(&mut args)?;
+    let (config_file, _, ext_from_config) = merge_tree_config(&mut args)?;
     ensure_root(&args.root)?;
-    let filter = build_filter(&args)?;
+    let ext_source = if ext_from_config {
+        "config [filter].extensions"
+    } else {
+        "--ext"
+    };
+    let filter = build_filter(&args, ext_source)?;
     if let Some(path) = &args.report {
         ensure_report_dir(path)?;
     }
     let console = console_cfg(&args);
-    print_header(console, format!("mode=scan root={}", args.root.display()));
+    print_header(console, format!("mode=scan  root={}", args.root.display()));
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(&args)?;
     ensure_report_not_ignore(args.report.as_deref(), ignore_recorded.as_deref())?;
@@ -1151,11 +1182,16 @@ fn cmd_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
 /// per-file issue (`unknown` / decode / io) remains.
 fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_convert_config(&mut args)?;
+    let (config_file, ext_from_config) = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
     ensure_root(&common.root)?;
-    let filter = build_filter(common)?;
+    let ext_source = if ext_from_config {
+        "config [filter].extensions"
+    } else {
+        "--ext"
+    };
+    let filter = build_filter(common, ext_source)?;
     // The report pre-flight is side-effect-free, so it runs before the backup
     // directory is created — a rejected report path must not leave a fresh
     // backup dir behind.
@@ -1168,7 +1204,7 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
     print_header(
         console,
         format!(
-            "mode=convert target={} root={}{}",
+            "mode=convert  target={}  root={}{}",
             target,
             common.root.display(),
             dry_tag
@@ -1259,14 +1295,22 @@ fn cmd_convert_tree(args: &ConvertArgs) -> anyhow::Result<i32> {
 /// Exit 0 on success, 3 on any failure.
 fn cmd_verify(args: &TreeArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let (config_file, _) = merge_tree_config(&mut args)?;
+    let (config_file, _, ext_from_config) = merge_tree_config(&mut args)?;
     ensure_root(&args.root)?;
-    let filter = build_filter(&args)?;
+    let ext_source = if ext_from_config {
+        "config [filter].extensions"
+    } else {
+        "--ext"
+    };
+    let filter = build_filter(&args, ext_source)?;
     if let Some(path) = &args.report {
         ensure_report_dir(path)?;
     }
     let console = console_cfg(&args);
-    print_header(console, format!("mode=verify root={}", args.root.display()));
+    print_header(
+        console,
+        format!("mode=verify  root={}", args.root.display()),
+    );
 
     let (ignore, ignore_recorded, ignore_warnings) = load_ignore(&args)?;
     ensure_report_not_ignore(args.report.as_deref(), ignore_recorded.as_deref())?;
@@ -1377,7 +1421,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
     let console = console_cfg(common);
     print_header(
         console,
-        format!("mode=fetch target={} url={url}", args.target_or_default()),
+        format!("mode=fetch  target={}  url={url}", args.target_or_default()),
     );
     let started_at = wall_now();
     let started = Instant::now();
@@ -1514,7 +1558,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
     let elapsed = started.elapsed();
 
     let options = OptionsBlock {
-        target: args.target_or_default().tag(),
+        target: args.target_or_default().tag().to_string(),
         dry_run: args.dry_run,
         extensions: Vec::new(),
         exclude_dirs: Vec::new(),
@@ -1577,7 +1621,7 @@ fn cmd_convert_url(args: &ConvertArgs, url: &str) -> anyhow::Result<i32> {
 /// runs read-only, so the preview reports the tree's current end state.
 fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     let mut args = args.clone();
-    let config_file = merge_convert_config(&mut args)?;
+    let (config_file, ext_from_config) = merge_convert_config(&mut args)?;
     let common = &args.common;
     let target = args.target_or_default();
     // The verify gate asserts UTF-8 without BOM no matter what the convert
@@ -1591,7 +1635,12 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
         );
     }
     ensure_root(&common.root)?;
-    let filter = build_filter(common)?;
+    let ext_source = if ext_from_config {
+        "config [filter].extensions"
+    } else {
+        "--ext"
+    };
+    let filter = build_filter(common, ext_source)?;
     // Same ordering as convert: probe the report path before creating the
     // backup directory, so a rejected report leaves nothing behind.
     if let Some(path) = &common.report {
@@ -1603,7 +1652,7 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
     print_header(
         console,
         format!(
-            "mode=fix target={} root={}{}",
+            "mode=fix  target={}  root={}{}",
             target,
             common.root.display(),
             dry_tag
@@ -1661,12 +1710,20 @@ fn cmd_fix(args: &FixArgs) -> anyhow::Result<i32> {
         .map(|r| r.path.clone())
         .collect();
     verify_failed.sort();
+    // One problem line per path: the gate line is suppressed when the
+    // convert pass already reported the same file (its row names the real
+    // cause, not the downstream verification symptom).
+    let convert_reported: std::collections::HashSet<String> = convert_records
+        .iter()
+        .filter(|r| r.action == "error")
+        .map(|r| r.path.clone())
+        .collect();
     for r in &verify_records {
-        if r.action == "failed" {
+        if r.action == "failed" && !convert_reported.contains(&r.path) {
             let reason = r
                 .error
                 .clone()
-                .unwrap_or_else(|| format!("detected={}", r.detected.unwrap_or("?")));
+                .unwrap_or_else(|| format!("detected={}", r.detected.as_deref().unwrap_or("?")));
             print_problem(format!("failed {} ({reason})", r.path));
         }
     }
@@ -1754,8 +1811,17 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     let load = |p: &Path, flag: &str| -> anyhow::Result<DiffInput> {
         let text = fs::read_to_string(p)
             .with_context(|| format!("cannot load {flag} report `{}`", p.display()))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("cannot load {flag} report `{}`", p.display()))
+        let parse = |e: serde_json::Error| {
+            // serde names internal types in some messages (`struct
+            // DiffInput with N elements`); operators only know the JSON
+            // shape, so the hint replaces the type name.
+            let reason = format!("{e}").replace("DiffInput", "report");
+            anyhow::anyhow!(
+                "cannot load {flag} report `{}`: {reason} (a utf8-forge report is a JSON object with a files[] array)",
+                p.display()
+            )
+        };
+        serde_json::from_str(&text).map_err(parse)
     };
     let before_raw = load(&args.before, "--before")?;
     let after_raw = load(&args.after, "--after")?;
@@ -1764,6 +1830,16 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     {
         print_problem(format!(
             "warning: roots differ (`{r1}` vs `{r2}`); paths are compared relative to each root"
+        ));
+    }
+    // Cross-mode diffs compare different action vocabularies (scan's
+    // `detected` against convert's `converted`/`unchanged`) and read as full
+    // churn; nudge the operator the way the roots warning does.
+    if let (Some(m1), Some(m2)) = (&before_raw.mode, &after_raw.mode)
+        && m1 != m2
+    {
+        print_problem(format!(
+            "warning: report modes differ ({m1} vs {m2}); actions are compared verbatim across modes"
         ));
     }
 

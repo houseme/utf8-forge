@@ -7,6 +7,41 @@ CLI, so entries marked **lib-visible** affect downstream Rust consumers.
 Pre-1.0 releases may change the library API between patch versions — every
 such change is listed explicitly.
 
+## [0.2.5] — unreleased
+
+### Fixed
+
+- `--exclude-glob` rejects patterns containing `[` or `{` as a fatal input
+  error: the grammar has no character classes or brace expansion, and the
+  old behavior silently matched nothing (files an operator believed excluded
+  were rewritten by `convert`).
+- Fetch error lines drop the doubled `fetch error:` prefix and now include
+  the root cause (`connection refused`, DNS, proxy…), plus an
+  `HTTP_PROXY`/`NO_PROXY` hint on send failures.
+- The exit-code contract (0/1/2/3) appears in `--help`; `verify`'s one-liner
+  states its exit 3; `-q`/`--verbose` help text matches actual behavior.
+- Invalid-extension errors name their source (`--ext` vs
+  `config [filter].extensions`).
+- `diff` warns when the two reports come from different modes (comparing
+  scan against convert reads as full churn); its load errors no longer leak
+  internal type names; `fix` prints one problem line per failing file
+  instead of two; console separators are consistent.
+
+### Added
+
+- **lib-visible (breaking)**: report types now implement `Deserialize` —
+  `Report`'s implementation dispatches on `mode` (the per-mode summaries
+  share field names, so standalone `Summary` deserialization is refused);
+  `FileRecord.detected`, `FileRecord.action`, and `OptionsBlock.target`
+  changed from `&'static str` to `String`. `FILE_ACTIONS` documents the
+  per-file action vocabulary.
+- **lib-visible (additive)**: `FilterOptions.exclude_dirs_override` replaces
+  the default excluded-directory set (previously impossible to un-exclude).
+- Operator notes: interrupted-run temp-file cleanup recipe, `/dev/null`
+  report refusal, dry-run pending-changes jq recipe, the `--exclude-glob`
+  grammar restriction; walker/reporter/transcoder rustdoc examples and a
+  Feature flags section in the lib docs.
+
 ## [0.2.4] — 2026-11-13 (tag `v0.2.4`; published to crates.io)
 
 ### Fixed

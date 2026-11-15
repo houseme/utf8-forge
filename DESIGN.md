@@ -608,7 +608,7 @@ Value placeholders in `--help` are the option's field name (e.g. `<ROOT>`,
 ```toml
 [package]
 name = "utf8-forge"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 
 [[bin]]

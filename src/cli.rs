@@ -39,7 +39,9 @@ pub(crate) const DEFAULT_MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
 #[command(
     name = "utf8-forge",
     version,
-    about = "Idempotent charset transcoder for source trees (default target: UTF-8 without BOM)"
+    about = "Idempotent charset transcoder for source trees (default target: UTF-8 without BOM)",
+    after_help = "Exit codes: 0 ok; 1 per-file issues (scan/convert/fetch, diff --fail-on-change); \
+                  2 fatal (bad args, setup failure); 3 verify/fix gate failure"
 )]
 pub struct Cli {
     /// Selected subcommand.
@@ -55,7 +57,7 @@ pub enum Commands {
     Scan(TreeArgs),
     /// Detect + transcode + atomic write (supports --dry-run, --url).
     Convert(ConvertArgs),
-    /// Assert all whitelisted files are UTF-8 without BOM.
+    /// Assert all whitelisted files are UTF-8 without BOM (exit 3 on failure).
     Verify(TreeArgs),
     /// Detect + transcode + verify in one pass (exit 3 when the gate fails).
     Fix(FixArgs),
@@ -128,7 +130,8 @@ pub struct TreeArgs {
     #[arg(long = "report")]
     pub report: Option<PathBuf>,
 
-    /// Print errors only.
+    /// Print errors only (verify/fix still print gate-critical walk
+    /// warnings; overrides --verbose).
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 

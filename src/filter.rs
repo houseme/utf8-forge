@@ -94,6 +94,10 @@ pub struct FilterOptions {
     pub exclude_ext: Vec<String>,
     /// Extra excluded directory names (appended to the defaults).
     pub exclude_dirs: Vec<String>,
+    /// Replaces the default excluded-directory set entirely when present.
+    /// `None` (or an empty `exclude_dirs`) keeps the defaults; an override
+    /// that names a default directory re-includes it for scanning.
+    pub exclude_dirs_override: Option<Vec<String>>,
     /// Extra glob patterns matched against root-relative paths.
     pub exclude_globs: Vec<String>,
     /// Adds `RC_EXTENSIONS` to the default whitelist.
@@ -125,8 +129,8 @@ pub struct FilterConfig {
 impl FilterConfig {
     /// Build the effective config. Fatal-input problems (conflicting flags,
     /// malformed globs) return `Err` → CLI exit code 2.
-    pub fn build(opts: &FilterOptions) -> Result<FilterConfig, String> {
-        let exclude_ext: HashSet<String> = normalize_ext_list(&opts.exclude_ext)?;
+    pub fn build(opts: &FilterOptions, ext_source: &str) -> Result<FilterConfig, String> {
+        let exclude_ext: HashSet<String> = normalize_ext_list(&opts.exclude_ext, "--exclude-ext")?;
 
         // Opt-in sets must not be simultaneously included and excluded; that
         // configuration is contradictory, so it is a fatal input error.
@@ -145,7 +149,7 @@ impl FilterConfig {
         // to the default set. An explicit override that normalizes to nothing
         // (`--ext ""`) would silently scan zero files, so it is fatal.
         let mut extensions: HashSet<String> = if !opts.ext_override.is_empty() {
-            let normalized = normalize_ext_list(&opts.ext_override)?;
+            let normalized = normalize_ext_list(&opts.ext_override, ext_source)?;
             if normalized.is_empty() {
                 return Err("empty --ext list: no usable extensions".to_string());
             }
@@ -167,10 +171,19 @@ impl FilterConfig {
             extensions.remove(e);
         }
 
-        let mut exclude_dirs: HashSet<String> = DEFAULT_EXCLUDE_DIRS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let mut exclude_dirs: HashSet<String> = match &opts.exclude_dirs_override {
+            // A present override replaces the default set entirely; an
+            // absent one keeps the defaults underneath the extras.
+            Some(list) => list
+                .iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => DEFAULT_EXCLUDE_DIRS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        };
         exclude_dirs.extend(normalize_dir_list(&opts.exclude_dirs));
 
         let exclude_prefixes: Vec<String> = DEFAULT_EXCLUDE_PREFIXES
@@ -219,18 +232,18 @@ impl FilterConfig {
 /// (`..h`) or contains a slash (`.cpp/`) can never match a real extension —
 /// it would be a silent no-op indistinguishable from "no matching files" —
 /// so those are fatal input errors instead.
-fn normalize_ext_list(values: &[String]) -> Result<HashSet<String>, String> {
+fn normalize_ext_list(values: &[String], source: &str) -> Result<HashSet<String>, String> {
     let mut out = HashSet::new();
     for raw in values {
         let v = raw.trim();
         let v = v.strip_prefix('.').unwrap_or(v).to_ascii_lowercase();
         if v.starts_with('.') {
             return Err(format!(
-                "invalid extension value `{raw}`: too many leading dots"
+                "invalid {source} value `{raw}`: too many leading dots"
             ));
         }
         if v.contains('/') {
-            return Err(format!("invalid extension value `{raw}`: contains `/`"));
+            return Err(format!("invalid {source} value `{raw}`: contains `/`"));
         }
         if !v.is_empty() {
             out.insert(v);
@@ -292,6 +305,16 @@ impl Glob {
         } else {
             pattern.to_string()
         };
+        // This grammar supports only `*`, `?` and `**`. Character classes
+        // and brace expansion are not implemented — accepting them as
+        // literals would silently exclude nothing for an operator porting
+        // gitignore/bash habits, so they are a loud input error instead.
+        if normalized.contains('[') || normalized.contains('{') {
+            return Err(String::from(
+                "this grammar supports only `*`, `?` and `**`; `[` and `{` are not glob \
+                 constructs and would match literally",
+            ));
+        }
         let parts: Vec<String> = normalized
             .split('/')
             .filter(|s| !s.is_empty())
@@ -541,7 +564,7 @@ mod tests {
 
     #[test]
     fn build_default_whitelist_contains_cpp_not_rc() {
-        let cfg = FilterConfig::build(&FilterOptions::default()).unwrap();
+        let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
         assert!(cfg.extensions.contains("cpp"));
         assert!(cfg.extensions.contains("proto"));
         assert!(!cfg.extensions.contains("rc"));
@@ -550,11 +573,14 @@ mod tests {
 
     #[test]
     fn build_opt_in_flags_add_their_sets() {
-        let cfg = FilterConfig::build(&FilterOptions {
-            include_rc: true,
-            include_msbuild: true,
-            ..Default::default()
-        })
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                include_rc: true,
+                include_msbuild: true,
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap();
         assert!(cfg.extensions.contains("rc"));
         assert!(cfg.extensions.contains("rc2"));
@@ -565,11 +591,14 @@ mod tests {
 
     #[test]
     fn build_ext_override_replaces_default_set() {
-        let cfg = FilterConfig::build(&FilterOptions {
-            ext_override: vec!["H".into(), "cpp".into()],
-            include_rc: true,
-            ..Default::default()
-        })
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                ext_override: vec!["H".into(), "cpp".into()],
+                include_rc: true,
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap();
         assert!(cfg.extensions.contains("h"));
         assert!(cfg.extensions.contains("cpp"));
@@ -580,10 +609,13 @@ mod tests {
 
     #[test]
     fn build_exclude_ext_removes_from_whitelist() {
-        let cfg = FilterConfig::build(&FilterOptions {
-            exclude_ext: vec!["CPP".into(), "".into()],
-            ..Default::default()
-        })
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                exclude_ext: vec!["CPP".into(), "".into()],
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap();
         assert!(!cfg.extensions.contains("cpp"));
         assert!(cfg.extensions.contains("h"));
@@ -591,19 +623,25 @@ mod tests {
 
     #[test]
     fn build_detects_documented_conflicts() {
-        let err = FilterConfig::build(&FilterOptions {
-            include_rc: true,
-            exclude_ext: vec!["rc".into()],
-            ..Default::default()
-        })
+        let err = FilterConfig::build(
+            &FilterOptions {
+                include_rc: true,
+                exclude_ext: vec!["rc".into()],
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap_err();
         assert!(err.contains("--include-rc"));
 
-        let err = FilterConfig::build(&FilterOptions {
-            include_msbuild: true,
-            exclude_ext: vec!["vcxproj".into()],
-            ..Default::default()
-        })
+        let err = FilterConfig::build(
+            &FilterOptions {
+                include_msbuild: true,
+                exclude_ext: vec!["vcxproj".into()],
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap_err();
         assert!(err.contains("--include-msbuild"));
     }
@@ -612,19 +650,25 @@ mod tests {
     fn build_rejects_bad_glob() {
         // No bad glob can exist today (empty is the only failure), but the
         // plumbing must surface it as Err.
-        let res = FilterConfig::build(&FilterOptions {
-            exclude_globs: vec!["".into()],
-            ..Default::default()
-        });
+        let res = FilterConfig::build(
+            &FilterOptions {
+                exclude_globs: vec!["".into()],
+                ..Default::default()
+            },
+            "--ext",
+        );
         assert!(res.is_err());
     }
 
     #[test]
     fn excluded_dir_name_is_case_insensitive_with_prefix_rule() {
-        let cfg = FilterConfig::build(&FilterOptions {
-            exclude_dirs: vec!["GameServer201".into()],
-            ..Default::default()
-        })
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                exclude_dirs: vec!["GameServer201".into()],
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap();
         assert!(cfg.is_excluded_dir_name(OsStr::new("dep")));
         assert!(cfg.is_excluded_dir_name(OsStr::new("DEP")));
@@ -638,13 +682,16 @@ mod tests {
 
     #[test]
     fn hidden_respects_include_flag() {
-        let cfg = FilterConfig::build(&FilterOptions::default()).unwrap();
+        let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
         assert!(cfg.is_hidden_name(OsStr::new(".hidden.cpp")));
         assert!(!cfg.is_hidden_name(OsStr::new("a.cpp")));
-        let cfg = FilterConfig::build(&FilterOptions {
-            include_hidden: true,
-            ..Default::default()
-        })
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                include_hidden: true,
+                ..Default::default()
+            },
+            "--ext",
+        )
         .unwrap();
         assert!(!cfg.is_hidden_name(OsStr::new(".hidden.cpp")));
     }

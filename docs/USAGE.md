@@ -195,6 +195,9 @@ Exit codes:
 > zero components) — `--exclude-glob src`, `src/` and `src/**` all exclude
 > the whole `src/` subtree (matching directories are pruned with their
 > contents); `**/name/**` excludes `name/` at any depth.
+> The grammar supports only `*`, `?` and `**`; `[` and `{` are rejected as a fatal
+> input error rather than silently matching literally.
+
 
 **Per-command flag surface**: `--target`, `--dry-run` and `--backup-dir` exist
 on `convert` and `fix` (`fix` accepts only `--target utf-8`). `scan` and
@@ -430,6 +433,19 @@ default whitelist — and `[convert].backup_dir = ""` is fatal, naming the key. 
 `url`, `output`, `ignore_file`, and quiet/verbose are deliberately absent from
 the schema (`ignore_file` in TOML is a fatal unknown key); `--config` combined
 with `--url` is fatal too — fetch mode reads no config.
+
+
+### 5.9 Operator notes
+
+- An interrupted run (Ctrl-C, SIGKILL) can leave hidden `.utf8-forge-tmp-*`
+  files next to the file being written, and `.utf8-forge-fetch-*` in the
+  system temp directory for `--url`. They are never re-processed or scanned;
+  remove them with `find . -name '.utf8-forge-tmp-*' -delete`.
+- `--report` needs a real file path — `/dev/null` is refused; omit the flag
+  to run without a report.
+- Dry-run "pending changes" gate for CI:
+  `utf8-forge convert --root D:\srv --dry-run --report dry.json`
+  then `jq -e '[.files[] | select(.action == "would_convert")] | length == 0' dry.json`.
 
 ---
 

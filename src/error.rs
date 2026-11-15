@@ -65,7 +65,7 @@ impl fmt::Display for ForgeError {
                 write!(f, "file too large: {size} bytes > --max-file-size {max}")
             }
             ForgeError::Io(e) => write!(f, "io error: {e}"),
-            ForgeError::Fetch(e) => write!(f, "fetch error: {e}"),
+            ForgeError::Fetch(e) => write!(f, "{e}"),
         }
     }
 }

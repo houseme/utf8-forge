@@ -178,6 +178,8 @@ utf8-forge diff --before a.json --after b.json | jq .
 > `**` 吸收其余组件，也包括零个组件）——`--exclude-glob src`、`src/` 与
 > `src/**` 都会排除整个 `src/` 子树（匹配到的目录连同内容一起剪枝）；
 > `**/name/**` 在任意深度排除 `name/`。
+> 该语法仅支持 `*`、`?` 与 `**`；`[` 和 `{` 会作为致命输入错误拒绝，而不会静默地按字面匹配。
+
 
 **子命令旗标面**：`--target`、`--dry-run`、`--backup-dir` 由 `convert` 与
 `fix` 支持（`fix` 仅接受 `--target utf-8`）。`scan` 与 `verify` 会拒绝这些
@@ -392,6 +394,18 @@ threads = 8
 `root`、`report`、`dry-run`、`url`、`output`、`ignore_file` 与 quiet/verbose
 被有意排除在 schema 之外（`ignore_file` 出现在 TOML 中即致命未知键）；
 `--config` 与 `--url` 同用同样致命 —— fetch 模式不读取配置。
+
+
+### 5.9 操作者备忘
+
+- 运行被中断（Ctrl-C、SIGKILL）时，可能在被写文件旁留下隐藏的
+  `.utf8-forge-tmp-*` 文件；`--url` 则会在系统临时目录留下
+  `.utf8-forge-fetch-*`。它们不会被重新处理或扫描；可用
+  `find . -name '.utf8-forge-tmp-*' -delete` 清理。
+- `--report` 需要真实文件路径——`/dev/null` 会被拒绝；不需要报告时省略该旗标。
+- 干跑"有待变更"CI 门：
+  `utf8-forge convert --root D:\srv --dry-run --report dry.json`
+  然后 `jq -e '[.files[] | select(.action == "would_convert")] | length == 0' dry.json`。
 
 ---
 

@@ -1275,7 +1275,7 @@ fn per_file_size_limits_preserve_oversized_sources() {
     ctx.max_file_size = GBK.len() as u64;
     assert_eq!(
         utf8_forge::scan_file(&path, ctx.max_file_size).detected,
-        Some("gb18030")
+        Some("gb18030".to_string())
     );
     assert_eq!(utf8_forge::convert_file(&path, &ctx).action, "converted");
     assert_eq!(fs::read(&path).unwrap(), UTF8);

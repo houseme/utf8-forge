@@ -14,6 +14,14 @@
 
 //! Strict decode / encode / transcode.
 //!
+//! ```rust
+//! use utf8_forge::transcoder::{decode_strict, encode, TargetEncoding};
+//!
+//! let text = decode_strict(&[0xFF, 0xFE, b'h', 0], utf8_forge::detector::detect(&[0xFF, 0xFE, b'h', 0])).unwrap();
+//! assert_eq!(&*text, "h");
+//! assert_eq!(encode(&text, TargetEncoding::Utf8).unwrap(), b"h");
+//! ```
+//!
 //! Rules enforced here:
 //! - UTF-16 encoders never emit a BOM by themselves — [`encode`] prepends it
 //!   manually.

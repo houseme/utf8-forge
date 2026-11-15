@@ -33,7 +33,7 @@ fn put(root: &Path, rel: &str, bytes: &[u8]) {
 /// Walk a fresh filter config over the tree, returning sorted file names
 /// relative to `root`.
 fn walk(root: &Path, opts: &FilterOptions) -> Vec<String> {
-    let cfg = FilterConfig::build(opts).unwrap();
+    let cfg = FilterConfig::build(opts, "--ext").unwrap();
     let res = collect_files(root, &cfg, &[], None);
     res.files
         .iter()
@@ -222,11 +222,11 @@ fn symlinked_files_are_skipped() {
 
 #[test]
 fn leading_dot_ext_values_match() {
-    let cfg = FilterConfig::build(&FilterOptions {
+    let opts = FilterOptions {
         ext_override: vec![".md".into(), ".Hpp".into()],
         ..Default::default()
-    })
-    .unwrap();
+    };
+    let cfg = FilterConfig::build(&opts, "--ext").unwrap();
     assert!(cfg.extensions.contains("md"));
     assert!(cfg.extensions.contains("hpp"));
 }
@@ -263,7 +263,7 @@ fn complex_glob_excludes_files_through_both_filter_layers() {
     };
     assert_eq!(walk(dir.path(), &opts), vec!["keep.cpp"]);
 
-    let config = FilterConfig::build(&FilterOptions::default()).unwrap();
+    let config = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
     let ignore = utf8_forge::ignorefile::IgnoreFile::parse(&pattern).unwrap();
     let result = collect_files(dir.path(), &config, &[], Some(&ignore));
     assert!(result.warnings.is_empty());

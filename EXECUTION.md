@@ -539,7 +539,7 @@ failed (a warning-only gate failure exits 3 without it).
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "mode": "convert",                     // scan | convert | verify | fetch | fix
   "root": "D:\\server",                  // omitted in fetch mode
   "url": "https://example.com/a.cpp",    // omitted without --url
@@ -628,7 +628,7 @@ line always goes to stderr, so `diff … | jq .` works):
 ```jsonc
 {
   "tool": "utf8-forge",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "mode": "diff",
   "before": "apply2.json",               // --before value verbatim
   "after": "apply3.json",                // --after value verbatim

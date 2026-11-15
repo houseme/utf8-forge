@@ -14,6 +14,16 @@
 
 //! Recursive candidate collection on top of `walkdir`.
 //!
+//! ```rust
+//! use utf8_forge::filter::{FilterConfig, FilterOptions};
+//! use utf8_forge::walker::collect_files;
+//!
+//! let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
+//! let result = collect_files(std::path::Path::new("."), &cfg, &[], None);
+//! // `result.files` is the sorted whitelist; `result.warnings` carries
+//! // non-fatal traversal problems.
+//! ```
+//!
 //! - Symlinks are never followed, neither directories nor files: a symlinked
 //!   directory is not descended into and a symlinked file is skipped.
 //! - Directory-name / prefix exclusions prune directories during traversal
