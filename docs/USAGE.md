@@ -314,12 +314,14 @@ untouched) — the same refusal pattern as the UTF-16LE NUL guard (§4.1).
 
 Besides U+E5E5, `--target gb18030` refuses one more content class: text
 whose gb18030 encoding is itself valid UTF-8 that reads back as *different*
-characters. 1920 hanzi encode this way (every GB2312 two-byte cell whose
-lead byte is `C2–D7` and trail byte `A1–BF`; e.g. 一 → `D2 BB`, which the
-detector reads back as һ). Writing such output would make the next run
-re-detect the file as UTF-8 and silently rewrite it, so the transcode fails
-with `encode_error` (exit 1) and the file keeps its original bytes. ASCII
-content and content whose gb18030 output is not valid UTF-8 convert freely.
+characters. 1920 scalars encode this way — every gb18030 two-byte cell with
+lead byte `C2–DF` and trail byte `80–BF`, exactly the byte pairs that also
+decode as two-byte UTF-8 (e.g. 一 → `D2 BB`, which the detector reads back as
+һ; all 1920 re-encode differently after the read-back). Writing such output
+would make the next run re-detect the file as UTF-8 and silently rewrite it,
+so the transcode fails with `encode_error` (exit 1) and the file keeps its
+original bytes. ASCII content and content whose gb18030 output is not valid
+UTF-8 convert freely.
 
 The WHATWG mappings are also canonical: a `--target gb18030` pass over
 already-GB18030 files rewrites legacy byte spellings into their canonical

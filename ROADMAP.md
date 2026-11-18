@@ -284,7 +284,16 @@ Verification of this wave: all gates green (fmt, clippy ×2 feature sets,
 241 all-feature + 202 local-only tests, doc -D warnings, release build);
 a 14-probe empirical battery against the release binary re-ran every finding's
 original scenario (all PASS — the P0 now refuses with `encode_error`, bytes
-untouched, deterministic rerun). The R12.1 guard was refined during
+untouched, deterministic rerun). A separate adversarial verifier pass
+re-checked all 22 acceptance rows against code/tests/docs: 20 PASS outright;
+its 3 P3 residuals were closed in the same wave — `cmd_diff` warnings now
+print only after the diff report is durable (completing the R12.6
+ordering), the gb18030 doc characterization was corrected to the measured
+byte facts (lead `C2–DF` × trail `80–BF` = 1,920 cells, all refused; the
+criterion is the round trip, not a byte range), and the residual named-test
+gaps were closed (fetch-shaped round-trip fixture + typed deserialize of a
+real fetch report, config `[filter].exclude_ext` attribution, `--report`
+symlink pre-flight). The R12.1 guard was refined during
 implementation: the refusal fires only when reading the output back as UTF-8
 and re-encoding would produce *different* bytes (the corruption condition);
 outputs that read back identically (ASCII; a BOM-only file's `

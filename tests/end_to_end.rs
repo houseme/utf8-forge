@@ -1952,3 +1952,51 @@ fn real_report_json_deserializes_into_the_typed_report() {
         other => panic!("fix summary expected, got {other:?}"),
     }
 }
+
+#[test]
+fn config_exclude_ext_errors_name_the_config_key() {
+    // R11.4 attribution extended to every filter list: a config-sourced
+    // exclusion must be attributed to `[filter].exclude_ext`, not a flag.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    let cfg = dir.path().join("c.toml");
+    fs::write(&cfg, "[filter]\nexclude_ext = [\"..h\"]\n").unwrap();
+    let mut a = args(&root, None);
+    a.config = Some(cfg);
+    let code = run_tree(Commands::Scan, &a);
+    assert_eq!(code, 2);
+    // The message is deterministic; assert its shape through the error the
+    // fatal path produces (build_filter labels come from ListOrigins).
+    let bad = utf8_forge::filter::FilterOptions {
+        exclude_ext: vec!["..h".into()],
+        ..Default::default()
+    };
+    let sources = utf8_forge::filter::FilterSources {
+        exclude_ext: "config [filter].exclude_ext",
+        ..utf8_forge::filter::FilterSources::CLI
+    };
+    let err = utf8_forge::filter::FilterConfig::build(&bad, &sources).unwrap_err();
+    assert!(err.contains("config [filter].exclude_ext"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_report_path_is_refused_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    let target = dir.path().join("real.json");
+    fs::write(&target, b"keep me").unwrap();
+    let link = dir.path().join("link.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let code = run_tree(Commands::Scan, &args(&root, Some(&link)));
+    assert_eq!(code, 2);
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"keep me");
+}

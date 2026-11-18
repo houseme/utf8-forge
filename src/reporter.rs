@@ -438,7 +438,10 @@ mod tests {
             config_file: None,
             ignore_file: None,
         };
-        let cases: Vec<(&str, Summary)> = vec![
+        // (mode, summary, root, url) — fetch is the shape with `root`
+        // omitted and `url` set, exercising the `_ =>` dispatch arm and the
+        // Option fields every other fixture leaves unset.
+        let cases: Vec<(&str, Summary, Option<&str>, Option<&str>)> = vec![
             (
                 "scan",
                 Summary::Scan(ScanSummary {
@@ -447,6 +450,8 @@ mod tests {
                     gb18030: 1,
                     ..ScanSummary::default()
                 }),
+                Some("tree"),
+                None,
             ),
             (
                 "convert",
@@ -456,6 +461,8 @@ mod tests {
                     converted: 1,
                     ..ConvertSummary::default()
                 }),
+                Some("tree"),
+                None,
             ),
             (
                 "verify",
@@ -465,6 +472,8 @@ mod tests {
                     passed: 1,
                     failed: 0,
                 }),
+                Some("tree"),
+                None,
             ),
             (
                 // The superset shape: must NOT deserialize as the verify
@@ -479,15 +488,29 @@ mod tests {
                     failed: 1,
                     ..FixSummary::default()
                 }),
+                Some("tree"),
+                None,
+            ),
+            (
+                // Fetch shares the convert summary but inverts root/url.
+                "fetch",
+                Summary::Convert(ConvertSummary {
+                    total_files: 1,
+                    candidates: 1,
+                    converted: 1,
+                    ..ConvertSummary::default()
+                }),
+                None,
+                Some("https://example.com/legacy.cpp"),
             ),
         ];
-        for (mode, summary) in cases {
+        for (mode, summary, root, url) in cases {
             let report = Report {
                 tool: "utf8-forge".into(),
                 version: "0.2.5".into(),
                 mode: mode.into(),
-                root: Some("tree".into()),
-                url: None,
+                root: root.map(str::to_string),
+                url: url.map(str::to_string),
                 started_at: "2026-01-01T00:00:00Z".into(),
                 duration_ms: 5,
                 options: options.clone(),

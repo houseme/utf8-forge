@@ -681,3 +681,30 @@ fn fetch_output_fifo_fails_fast_instead_of_hanging() {
     assert!(!meta.file_type().is_file());
     assert_eq!(meta.permissions().mode() & 0o170000, 0o010000);
 }
+
+#[test]
+fn fetch_report_deserializes_into_the_typed_report() {
+    // Downstream tools parse reports with the crate's Deserialize impls; a
+    // fetch report is the shape with `root` omitted and `url` set, taking
+    // the convert-summary dispatch arm.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("legacy.cpp");
+    let report = dir.path().join("fetch-report.json");
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(GBK_NIHAO.len()),
+        body: GBK_NIHAO.to_vec(),
+        close_without_length: false,
+    });
+    let code = run(Commands::Convert(convert_url_args(url, out, report.clone(), 1024)).into());
+    assert_eq!(code, 0);
+    let text = fs::read_to_string(&report).unwrap();
+    let parsed: utf8_forge::reporter::Report = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed.mode, "fetch");
+    assert!(parsed.root.is_none(), "fetch reports carry no root");
+    assert!(parsed.url.is_some(), "fetch reports carry the url");
+    match parsed.summary {
+        utf8_forge::reporter::Summary::Convert(s) => assert_eq!(s.converted, 1),
+        other => panic!("convert summary expected, got {other:?}"),
+    }
+}

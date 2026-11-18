@@ -239,16 +239,18 @@ Known exception: a UTF-16 file whose content begins with a second BOM (U+FEFF)
 converges in two passes — pass 1 writes the content U+FEFF as a UTF-8 BOM
 (EF BB BF), which pass 2 strips; pass 3 is a no-op.
 
-**gb18030 self-misread guard.** 1920 hanzi (all of GB2312 levels 1–2 whose
-two-byte form is also a valid UTF-8 2-byte sequence, e.g. U+4E00 一 → `D2 BB`,
-which reads back as U+04BB һ) encode to gb18030 bytes that the detector
-classifies as UTF-8 on the next run; that run would decode *different
-characters* and rewrite the file (silent corruption, exit 0). When the
-gb18030 output differs from the input and reading it back as UTF-8 then
-re-encoding would produce different bytes, `transcode_detected` refuses with
-`EncodeError` (`encode_error`, exit 1) — the same posture as the UTF-16LE NUL
-guard. Outputs that read back identically (ASCII, and outputs that are not
-valid UTF-8 at all) convert freely.
+**gb18030 self-misread guard.** 1920 scalars — every gb18030 two-byte cell
+with lead byte `C2–DF` and trail byte `80–BF`, exactly the byte pairs that
+also decode as two-byte UTF-8 (e.g. U+4E00 一 → `D2 BB`, which reads back as
+U+04BB һ) — encode to gb18030 bytes that the detector classifies as UTF-8 on
+the next run; that run would decode *different characters* and rewrite the
+file (silent corruption, exit 0). The refusal criterion is the round trip,
+not a byte range: when the gb18030 output differs from the input and reading
+it back as UTF-8 then re-encoding would produce different bytes,
+`transcode_detected` refuses with `EncodeError` (`encode_error`, exit 1) —
+the same posture as the UTF-16LE NUL guard. All 1920 cells fail that round
+trip (measured); outputs that read back identically (ASCII, and outputs that
+are not valid UTF-8 at all) convert freely.
 
 ---
 

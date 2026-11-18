@@ -1938,10 +1938,14 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     };
     let before_raw = load(&args.before, "--before")?;
     let after_raw = load(&args.after, "--after")?;
+    // Warnings are buffered: with --report they print only after the report
+    // file is durable, so an stderr pipe-cut cannot drop it (the same
+    // ordering every other mode follows).
+    let mut diff_warnings: Vec<String> = Vec::new();
     if let (Some(r1), Some(r2)) = (&before_raw.root, &after_raw.root)
         && r1 != r2
     {
-        print_problem(format!(
+        diff_warnings.push(format!(
             "warning: roots differ (`{r1}` vs `{r2}`); paths are compared relative to each root"
         ));
     }
@@ -1951,7 +1955,7 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
     if let (Some(m1), Some(m2)) = (&before_raw.mode, &after_raw.mode)
         && m1 != m2
     {
-        print_problem(format!(
+        diff_warnings.push(format!(
             "warning: report modes differ ({m1} vs {m2}); actions are compared verbatim across modes"
         ));
     }
@@ -1988,7 +1992,13 @@ fn cmd_diff(args: &DiffArgs) -> anyhow::Result<i32> {
             summary.unchanged,
             path.display()
         );
+        for w in &diff_warnings {
+            print_problem(w.clone());
+        }
     } else {
+        for w in &diff_warnings {
+            print_problem(w.clone());
+        }
         eprintln!(
             "[utf8-forge] diff: added={}  removed={}  changed={}  unchanged={}",
             summary.added, summary.removed, summary.action_changed, summary.unchanged
