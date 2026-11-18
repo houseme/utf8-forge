@@ -85,6 +85,32 @@ pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
 /// `OutputFiles*`).
 pub const DEFAULT_EXCLUDE_PREFIXES: &[&str] = &["outputfile"];
 
+/// Attribution labels for filter-input errors: a fatal value must name the
+/// flag or config key it came from, so an operator can find the offending
+/// line. Each list carries its own label because the layers mix freely (for
+/// example a config-sourced whitelist with CLI-sourced exclusions).
+#[derive(Debug, Clone, Copy)]
+pub struct FilterSources {
+    /// Label for whitelist values (`--ext` or `config [filter].extensions`).
+    pub ext: &'static str,
+    /// Label for excluded extensions (`--exclude-ext` or the config key).
+    pub exclude_ext: &'static str,
+    /// Label for excluded directory names (`--exclude` or the config key).
+    pub exclude_dirs: &'static str,
+    /// Label for glob patterns (`--exclude-glob` or the config key).
+    pub exclude_globs: &'static str,
+}
+
+impl FilterSources {
+    /// Labels for values that arrived on the command line.
+    pub const CLI: FilterSources = FilterSources {
+        ext: "--ext",
+        exclude_ext: "--exclude-ext",
+        exclude_dirs: "--exclude",
+        exclude_globs: "--exclude-glob",
+    };
+}
+
 /// Raw filter inputs, normalized by [`FilterConfig::build`].
 #[derive(Debug, Clone, Default)]
 pub struct FilterOptions {
@@ -128,9 +154,12 @@ pub struct FilterConfig {
 
 impl FilterConfig {
     /// Build the effective config. Fatal-input problems (conflicting flags,
-    /// malformed globs) return `Err` → CLI exit code 2.
-    pub fn build(opts: &FilterOptions, ext_source: &str) -> Result<FilterConfig, String> {
-        let exclude_ext: HashSet<String> = normalize_ext_list(&opts.exclude_ext, "--exclude-ext")?;
+    /// malformed globs) return `Err` → CLI exit code 2. `sources` labels the
+    /// origin of each list so error messages name the right flag or config
+    /// key.
+    pub fn build(opts: &FilterOptions, sources: &FilterSources) -> Result<FilterConfig, String> {
+        let exclude_ext: HashSet<String> =
+            normalize_ext_list(&opts.exclude_ext, sources.exclude_ext)?;
 
         // Opt-in sets must not be simultaneously included and excluded; that
         // configuration is contradictory, so it is a fatal input error.
@@ -149,9 +178,9 @@ impl FilterConfig {
         // to the default set. An explicit override that normalizes to nothing
         // (`--ext ""`) would silently scan zero files, so it is fatal.
         let mut extensions: HashSet<String> = if !opts.ext_override.is_empty() {
-            let normalized = normalize_ext_list(&opts.ext_override, ext_source)?;
+            let normalized = normalize_ext_list(&opts.ext_override, sources.ext)?;
             if normalized.is_empty() {
-                return Err("empty --ext list: no usable extensions".to_string());
+                return Err(format!("empty {} list: no usable extensions", sources.ext));
             }
             normalized
         } else {
@@ -170,6 +199,14 @@ impl FilterConfig {
         for e in &exclude_ext {
             extensions.remove(e);
         }
+        // Exclusions can empty the effective whitelist just as surely as an
+        // empty `--ext` list would — a silent zero-file scan is never right.
+        if extensions.is_empty() {
+            return Err(format!(
+                "{} list is empty after {} removals: no usable extensions",
+                sources.ext, sources.exclude_ext
+            ));
+        }
 
         let mut exclude_dirs: HashSet<String> = match &opts.exclude_dirs_override {
             // A present override replaces the default set entirely; an
@@ -184,7 +221,10 @@ impl FilterConfig {
                 .map(|s| (*s).to_string())
                 .collect(),
         };
-        exclude_dirs.extend(normalize_dir_list(&opts.exclude_dirs));
+        exclude_dirs.extend(normalize_dir_list(
+            &opts.exclude_dirs,
+            sources.exclude_dirs,
+        )?);
 
         let exclude_prefixes: Vec<String> = DEFAULT_EXCLUDE_PREFIXES
             .iter()
@@ -195,7 +235,12 @@ impl FilterConfig {
         for pattern in &opts.exclude_globs {
             match Glob::compile(pattern) {
                 Ok(g) => exclude_globs.push(g),
-                Err(e) => return Err(format!("invalid --exclude-glob `{pattern}`: {e}")),
+                Err(e) => {
+                    return Err(format!(
+                        "invalid {} `{pattern}`: {e}",
+                        sources.exclude_globs
+                    ));
+                }
             }
         }
 
@@ -229,9 +274,10 @@ impl FilterConfig {
 ///
 /// Exactly one leading dot is stripped so `--ext .cpp` matches the extension
 /// `cpp` as the dot-less spelling does. A value that still starts with a dot
-/// (`..h`) or contains a slash (`.cpp/`) can never match a real extension —
-/// it would be a silent no-op indistinguishable from "no matching files" —
-/// so those are fatal input errors instead.
+/// (`..h`), contains a slash (`.cpp/`), or contains an inner dot (`tar.gz` —
+/// matching uses the text after the *last* dot, so a dotted whitelist entry
+/// can never match) would be a silent no-op indistinguishable from "no
+/// matching files"; those are fatal input errors instead.
 fn normalize_ext_list(values: &[String], source: &str) -> Result<HashSet<String>, String> {
     let mut out = HashSet::new();
     for raw in values {
@@ -245,6 +291,12 @@ fn normalize_ext_list(values: &[String], source: &str) -> Result<HashSet<String>
         if v.contains('/') {
             return Err(format!("invalid {source} value `{raw}`: contains `/`"));
         }
+        if v.contains('.') {
+            return Err(format!(
+                "invalid {source} value `{raw}`: extensions cannot contain `.` \
+                 (matching uses the text after the last dot)"
+            ));
+        }
         if !v.is_empty() {
             out.insert(v);
         }
@@ -254,13 +306,30 @@ fn normalize_ext_list(values: &[String], source: &str) -> Result<HashSet<String>
 
 /// Lowercase + trim + drop empties for directory-name list values.
 /// Names are kept verbatim otherwise — `.cache` is a legitimate directory
-/// name and must not lose its dot.
-fn normalize_dir_list(values: &[String]) -> HashSet<String> {
-    values
-        .iter()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect()
+/// name and must not lose its dot. A value containing a path separator or the
+/// `.`/`..` aliases can never equal a walked directory name, so those are
+/// fatal input errors (glob patterns are the supported way to exclude paths).
+fn normalize_dir_list(values: &[String], source: &str) -> Result<HashSet<String>, String> {
+    let mut out = HashSet::new();
+    for raw in values {
+        let v = raw.trim().to_ascii_lowercase();
+        if v.is_empty() {
+            continue;
+        }
+        if v == "." || v == ".." {
+            return Err(format!(
+                "invalid {source} value `{raw}`: `.` and `..` never name a real directory"
+            ));
+        }
+        if v.contains('/') || v.contains('\\') {
+            return Err(format!(
+                "invalid {source} value `{raw}`: directory names cannot contain `/`; \
+                 use a glob pattern to exclude by path"
+            ));
+        }
+        out.insert(v);
+    }
+    Ok(out)
 }
 
 /// Lowercased file extension of `path` (`foo.PNG` → `png`); `None` when the
@@ -564,7 +633,7 @@ mod tests {
 
     #[test]
     fn build_default_whitelist_contains_cpp_not_rc() {
-        let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
+        let cfg = FilterConfig::build(&FilterOptions::default(), &FilterSources::CLI).unwrap();
         assert!(cfg.extensions.contains("cpp"));
         assert!(cfg.extensions.contains("proto"));
         assert!(!cfg.extensions.contains("rc"));
@@ -579,7 +648,7 @@ mod tests {
                 include_msbuild: true,
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap();
         assert!(cfg.extensions.contains("rc"));
@@ -597,7 +666,7 @@ mod tests {
                 include_rc: true,
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap();
         assert!(cfg.extensions.contains("h"));
@@ -614,7 +683,7 @@ mod tests {
                 exclude_ext: vec!["CPP".into(), "".into()],
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap();
         assert!(!cfg.extensions.contains("cpp"));
@@ -629,7 +698,7 @@ mod tests {
                 exclude_ext: vec!["rc".into()],
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap_err();
         assert!(err.contains("--include-rc"));
@@ -640,24 +709,126 @@ mod tests {
                 exclude_ext: vec!["vcxproj".into()],
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap_err();
         assert!(err.contains("--include-msbuild"));
     }
 
     #[test]
-    fn build_rejects_bad_glob() {
-        // No bad glob can exist today (empty is the only failure), but the
-        // plumbing must surface it as Err.
-        let res = FilterConfig::build(
+    fn glob_grammar_rejects_character_classes_and_braces() {
+        // Gitignore/bash habits must fail loudly instead of compiling as
+        // literals that silently match nothing.
+        assert!(Glob::compile("[Tt]est*").is_err());
+        assert!(Glob::compile("*.{bak,tmp}").is_err());
+        assert!(Glob::compile("a*b").is_ok());
+        assert!(Glob::compile("]").is_ok());
+        assert!(Glob::compile("}").is_ok());
+    }
+
+    #[test]
+    fn build_rejects_bad_glob_with_the_source_label() {
+        let err = FilterConfig::build(
             &FilterOptions {
-                exclude_globs: vec!["".into()],
+                exclude_globs: vec!["[Tt]est*".into()],
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
+        )
+        .unwrap_err();
+        assert!(err.contains("--exclude-glob"), "{err}");
+        assert!(err.contains("grammar"), "{err}");
+
+        let err = FilterConfig::build(
+            &FilterOptions {
+                exclude_globs: vec!["[Tt]est*".into()],
+                ..Default::default()
+            },
+            &FilterSources {
+                exclude_globs: "config [filter].exclude_globs",
+                ..FilterSources::CLI
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("[filter].exclude_globs"), "{err}");
+
+        // The empty-pattern failure mode stays covered too.
+        assert!(
+            FilterConfig::build(
+                &FilterOptions {
+                    exclude_globs: vec!["".into()],
+                    ..Default::default()
+                },
+                &FilterSources::CLI,
+            )
+            .is_err()
         );
-        assert!(res.is_err());
+    }
+
+    #[test]
+    fn build_rejects_whitelist_emptied_by_exclusions() {
+        let err = FilterConfig::build(
+            &FilterOptions {
+                ext_override: vec!["md".into()],
+                exclude_ext: vec!["md".into()],
+                ..Default::default()
+            },
+            &FilterSources::CLI,
+        )
+        .unwrap_err();
+        assert!(err.contains("--exclude-ext"), "{err}");
+        assert!(err.contains("no usable extensions"), "{err}");
+    }
+
+    #[test]
+    fn extension_values_cannot_contain_inner_dots() {
+        // `a.tar.gz` yields the extension `gz`, so a dotted whitelist entry
+        // can never match — fatal instead of a silent no-op.
+        let err = FilterConfig::build(
+            &FilterOptions {
+                ext_override: vec!["tar.gz".into()],
+                ..Default::default()
+            },
+            &FilterSources::CLI,
+        )
+        .unwrap_err();
+        assert!(err.contains("tar.gz"), "{err}");
+        // A single leading dot is still the documented convenience form.
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                ext_override: vec![".cpp".into()],
+                ..Default::default()
+            },
+            &FilterSources::CLI,
+        )
+        .unwrap();
+        assert!(cfg.extensions.contains("cpp"));
+    }
+
+    #[test]
+    fn dir_name_values_cannot_contain_separators_or_dot_aliases() {
+        for bad in ["a/b", "sub/", "..", "."] {
+            let err = FilterConfig::build(
+                &FilterOptions {
+                    exclude_dirs: vec![bad.into()],
+                    ..Default::default()
+                },
+                &FilterSources::CLI,
+            )
+            .unwrap_err();
+            assert!(err.contains(bad), "{bad}: {err}");
+            assert!(err.contains("--exclude"), "{bad}: {err}");
+        }
+        // Dot-prefixed real directory names stay legal.
+        let cfg = FilterConfig::build(
+            &FilterOptions {
+                exclude_dirs: vec![".cache".into()],
+                ..Default::default()
+            },
+            &FilterSources::CLI,
+        )
+        .unwrap();
+        assert!(cfg.is_excluded_dir_name(OsStr::new(".cache")));
     }
 
     #[test]
@@ -667,7 +838,7 @@ mod tests {
                 exclude_dirs: vec!["GameServer201".into()],
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap();
         assert!(cfg.is_excluded_dir_name(OsStr::new("dep")));
@@ -682,7 +853,7 @@ mod tests {
 
     #[test]
     fn hidden_respects_include_flag() {
-        let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
+        let cfg = FilterConfig::build(&FilterOptions::default(), &FilterSources::CLI).unwrap();
         assert!(cfg.is_hidden_name(OsStr::new(".hidden.cpp")));
         assert!(!cfg.is_hidden_name(OsStr::new("a.cpp")));
         let cfg = FilterConfig::build(
@@ -690,7 +861,7 @@ mod tests {
                 include_hidden: true,
                 ..Default::default()
             },
-            "--ext",
+            &FilterSources::CLI,
         )
         .unwrap();
         assert!(!cfg.is_hidden_name(OsStr::new(".hidden.cpp")));

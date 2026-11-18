@@ -67,14 +67,19 @@ Exit codes:
 
 - `0` — success (no unexpected errors).
 - `1` — some files `unknown` / `decode_error` / `encode_error` / `io_error`;
-  with `--url`, also `fetch_error` (HTTP/TLS/timeout failure) and an oversized
+  with `--url`, also `fetch_error` (HTTP/TLS/timeout failure — including a
+  bodyless 204/304 response, a terminal `206 Partial Content`, or an
+  `https://` redirect that downgrades to plain `http://`) and an oversized
   payload. Each problem prints one stderr line; with `--url`, a decode error
-  reports against the output path.
+  reports against the output path. A symlinked or non-regular destination
+  (FIFO, device) is refused as an error row instead of being replaced or
+  hanging the comparison read.
 - `2` — fatal (bad args, missing root, flag conflicts, `--backup-dir` inside
-  `--root` or combined with `--url`, `--config` combined with `--url`,
+  `--root`, blank, or combined with `--url`, `--config` combined with `--url`,
   an unwritable or refused `--report` location — an existing write-protected
-  report file, or (tree modes) a report path equal to the active ignore
-  file). With `--url`
+  or symlinked report file, or (tree modes) a report path equal to the active
+  ignore file — and, with `--url`, a report path equal to the output path,
+  explicit or derived). With `--url`
   the `--report` pre-flight runs before the download starts, so a failure
   writes nothing.
 
@@ -121,7 +126,10 @@ Exit codes:
   `verify_failed_files`; a warning-only gate failure exits 3 without it, and
   the walk warning prints to stderr even under `--quiet`.
 - `1` — convert-side issues (`unknown` / `decode_error` / `encode_error` /
-  `io_error`) with no verify failure.
+  `io_error`) with no verify failure. Unreachable in practice today: every
+  convert-side issue also fails the verify gate on the same bytes (and fix's
+  forced `utf-8` target rules out encode refusals), so exit 3 always wins;
+  the arm is kept as a defensive fallback.
 - `2` — fatal (bad args, missing root, `--backup-dir` inside `--root`,
   non-`utf-8` `--target`).
 
@@ -169,7 +177,7 @@ Exit codes:
 | Flag                       | Default         | Notes                                                                                                                                                                      |
 |----------------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `-r, --root <PATH>`        | `.`             | Recursive root                                                                                                                                                             |
-| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`); an empty normalized list (`--ext ""`) is fatal (exit 2)                                           |
+| `-e, --ext <LIST>`         | see DESIGN §5.1 | **Replaces** default whitelist; leading dots stripped (`.cpp` == `cpp`); an empty normalized list (`--ext ""`), a value still starting with a dot (`..h`), containing `/`, or containing an inner dot (`tar.gz` — matching uses the text after the last dot) is fatal (exit 2); a whitelist emptied by `--exclude-ext` is fatal too |
 | `-x, --exclude <LIST>`     | see DESIGN §5.2 | Appended to default excludes                                                                                                                                               |
 | `-X, --exclude-ext <LIST>` | empty           | Appended                                                                                                                                                                   |
 | `--exclude-glob <GLOB>`    | empty           | Repeatable. Case-insensitive (ASCII folding — non-ASCII byte pairs compare literally) glob over root-relative path components; `/`-separated, `\` accepted; `**` spans components, `*`/`?` match within one; empty pattern → exit 2 |
@@ -195,6 +203,11 @@ Exit codes:
 > zero components) — `--exclude-glob src`, `src/` and `src/**` all exclude
 > the whole `src/` subtree (matching directories are pruned with their
 > contents); `**/name/**` excludes `name/` at any depth.
+> The same grammar restriction applies to ignore-file patterns: in an
+> explicitly given `--ignore-file` such a line is fatal (exit 2); in the
+> auto-discovered `.utf8forgeignore` the line is skipped with a warning and
+> the remaining rules stay active.
+
 > The grammar supports only `*`, `?` and `**`; `[` and `{` are rejected as a fatal
 > input error rather than silently matching literally.
 
@@ -299,6 +312,15 @@ sometimes contain). Content containing U+E5E5 is refused: the file is recorded
 as an `error` row with an `encode_error` reason (exit 1, original bytes
 untouched) — the same refusal pattern as the UTF-16LE NUL guard (§4.1).
 
+Besides U+E5E5, `--target gb18030` refuses one more content class: text
+whose gb18030 encoding is itself valid UTF-8 that reads back as *different*
+characters. 1920 hanzi encode this way (every GB2312 two-byte cell whose
+lead byte is `C2–D7` and trail byte `A1–BF`; e.g. 一 → `D2 BB`, which the
+detector reads back as һ). Writing such output would make the next run
+re-detect the file as UTF-8 and silently rewrite it, so the transcode fails
+with `encode_error` (exit 1) and the file keeps its original bytes. ASCII
+content and content whose gb18030 output is not valid UTF-8 convert freely.
+
 The WHATWG mappings are also canonical: a `--target gb18030` pass over
 already-GB18030 files rewrites legacy byte spellings into their canonical
 WHATWG forms — byte `0x80` → `A2 E3` for the euro sign, `A3 A0` → `A1 A1` for
@@ -392,8 +414,11 @@ build/**/auto*.h
 
 Syntax is a gitignore subset: case-insensitive (ASCII folding — non-ASCII
 byte pairs compare literally), no escapes (a backslash is a literal
-character), and — git parity — a file cannot be re-included when its parent
-directory is excluded. Folding is pinned by tests to ASCII letters: a
+character), no character classes or brace expansion (`[` and `{` are not part
+of the grammar), and — git parity — a file cannot be re-included when its
+parent directory is excluded. An invalid line in an explicit `--ignore-file`
+is fatal (exit 2, line number named); in the auto-discovered file each
+invalid line is skipped with a warning while the remaining rules stay active. Folding is pinned by tests to ASCII letters: a
 non-ASCII pattern character matches only its literal counterpart. Negation
 lifts only the ignore layer; the whitelist / `--exclude` / `--exclude-glob`
 layers still apply.

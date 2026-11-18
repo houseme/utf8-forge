@@ -11,6 +11,50 @@ such change is listed explicitly.
 
 ### Fixed
 
+- **`--target gb18030` refuses output the tool itself would silently rewrite on
+  the next run** (silent corruption): 1920 common hanzi (incl. 一, U+4E00 →
+  `D2 BB`) encode to gb18030 bytes that are themselves valid UTF-8 decoding to
+  *different* characters; a second `convert --target gb18030` re-detected the
+  file as UTF-8 and rewrote it (一→һ) with exit 0. The transcode now fails
+  with `encode_error` (exit 1, bytes untouched) whenever the gb18030 output
+  would read back and re-encode differently; stable outputs still convert.
+- `--report` can no longer overwrite the ignore file through a spelling
+  variant (`./tree/.utf8forgeignore` vs `tree/.utf8forgeignore`): the guard
+  compares canonicalized path projections.
+- One unsupported line (`[`/`{`) in the auto-discovered `.utf8forgeignore` no
+  longer disables every other rule: invalid lines are skipped with a
+  line-numbered warning (an explicit `--ignore-file` stays fatal on them).
+- `convert --url` refuses a `--report` path equal to the output path (explicit
+  or derived) before any network I/O — the report write used to silently
+  replace the fetched artifact with exit 0.
+- `fix` prints one problem line per failing file (unknown files previously got
+  both a `failed …` gate line and an `unknown …` convert line).
+- All warnings and problem lines now print only after the report file is
+  durable, so an stderr pipe-cut (`… 2>&1 >/dev/null | head`) can no longer
+  drop the report.
+- `verify`/`fix` print *every* traversal warning (only the last one was shown
+  when several subtrees were uninspectable).
+- Filter error messages attribute config-sourced values to their keys
+  (`[filter].exclude_ext` / `[filter].exclude_globs`) instead of the CLI
+  flags.
+- `--ext md --exclude-ext md` is fatal (the whitelist no longer silently
+  empties to a zero-file, exit-0 scan); dead filter values (`--ext tar.gz`,
+  `--exclude "a/b"`, `"sub/"`, `.`/`..`) are rejected.
+- `atomic_write` refuses symlink and non-regular (FIFO/socket/device)
+  destinations instead of silently replacing the entry; the `--report`
+  pre-flight refuses a symlinked report path; `--output` pointing at a FIFO
+  or device no longer hangs the comparison read.
+- Backups preserve the source file's permission bits (740 sources restored as
+  740, not 644).
+- `https://` fetches never follow a redirect that downgrades to plain
+  `http://` (kept lenient for plain-http requests); a terminal
+  `206 Partial Content` is refused as a truncation instead of being written.
+- Derived fetch output names are percent-decoded (`my%20file.cpp` →
+  `my file.cpp`, `%E6%BA%90%E7%A0%81.cpp` → `源码.cpp`); unsafe decodes keep
+  the encoded spelling.
+- `--config <path>` names a directory as a directory instead of "not found";
+  a blank `--backup-dir` value is fatal like the config form.
+
 - `--exclude-glob` rejects patterns containing `[` or `{` as a fatal input
   error: the grammar has no character classes or brace expansion, and the
   old behavior silently matched nothing (files an operator believed excluded
@@ -37,6 +81,17 @@ such change is listed explicitly.
   per-file action vocabulary.
 - **lib-visible (additive)**: `FilterOptions.exclude_dirs_override` replaces
   the default excluded-directory set (previously impossible to un-exclude).
+- **lib-visible (breaking)**: `FilterConfig::build` takes a
+  `&FilterSources` (attribution labels for the four filter lists) instead of
+  the `ext_source: &str` argument; `IgnoreFile` regains a public `is_empty()`
+  with corrected docs; `ConvertArgs::default()`/`FixArgs::default()` now
+  carry `target: None` (mirroring the parser) so a `[convert].target` config
+  key applies to programmatic runs; `read_body_to_temp` is private and takes
+  the wall-clock budget as a parameter (tests inject small budgets).
+- Operator notes: fetch behavior additions (206/bodyless refusals, https
+  downgrade gate, percent-decoded derived names, report≠output guard) in
+  README/USAGE; the ignore-file grammar restriction documented; `fix`'s
+  exit-1 documented as practically unreachable.
 - Operator notes: interrupted-run temp-file cleanup recipe, `/dev/null`
   report refusal, dry-run pending-changes jq recipe, the `--exclude-glob`
   grammar restriction; walker/reporter/transcoder rustdoc examples and a

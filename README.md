@@ -29,10 +29,11 @@ Mixed-encoding source trees (GB18030 / UTF-8 / UTF-8 BOM / UTF-16) cause:
 
 - ✅ Detect and convert **UTF-8 / UTF-8 BOM / UTF-16 LE / UTF-16 BE / GB18030** (UTF-32 LE/BE: detect + read only — never a write target)
 - ✅ Default target: **UTF-8 without BOM** (Strategy A of the Playbook)
-- ✅ **Bidirectional** conversion (GB18030 → UTF-8 → GB18030 is byte-lossless except the documented WHATWG canonicalization of legacy GB18030 byte spellings — see USAGE §4.4; `--target utf-16le` refuses content whose
+- ✅ **Bidirectional** conversion (GB18030 → UTF-8 → GB18030 is byte-lossless except the documented WHATWG canonicalization of legacy GB18030 byte spellings — see USAGE §4.4). `--target utf-16le` refuses content whose
   first character is U+0000 — its output would be byte-identical to the UTF-32LE BOM and could never be re-read as
-  UTF-16; `--target gb18030` refuses content containing U+E5E5 — the single Unicode scalar WHATWG's gb18030 encoder
-  cannot map)
+  UTF-16. `--target gb18030` refuses two content classes: U+E5E5 (the single scalar WHATWG's gb18030 encoder cannot
+  map) and content whose gb18030 encoding would itself read back as *different* characters (1920 common hanzi, e.g.
+  一 → `D2 BB`, which re-reads as һ — the next run would silently rewrite the file; see USAGE §4.4)
 - ✅ **Idempotent**: second run changes 0 bytes (double-BOM inputs converge in two passes)
 - ✅ **Whitelist-driven recursion** — never touches `dep/`, binaries, or build outputs
 - ✅ Gitignore-style `.utf8forgeignore` exclusions (auto-discovered)
@@ -102,11 +103,16 @@ utf8-forge convert \
 `--url` reuses the exact same detection / transcoding pipeline; only the source of bytes changes. Size is capped by
 `--max-file-size` (default 200 MiB).
 
-Notes: `--backup-dir` cannot be combined with `--url` (fatal, exit 2). An oversized payload fails with exit 1 and is
-not written. A write-protected destination file is refused exactly like tree mode (exit 1; the destination is left
-untouched). When `--output` is omitted, a URL segment with an extension is kept verbatim (`…/a.cpp` → `a.cpp`); an
-extension-less segment gets `.utf8` (`…/foo` → `foo.utf8`). Re-fetching identical content reports `unchanged` and skips
-the write. The size cap is enforced during download — an oversized payload aborts mid-stream and nothing is written.
+Notes: `--backup-dir` cannot be combined with `--url` (fatal, exit 2), and neither can a `--report` path equal to the
+output path (explicit or derived) — the report write would silently replace the fetched artifact. An oversized payload
+fails with exit 1 and is not written. A write-protected destination file is refused exactly like tree mode (exit 1; the
+destination is left untouched); so are symlinked and non-regular destinations (a FIFO would otherwise hang the
+comparison read). When `--output` is omitted, a URL segment with an extension is kept, percent-decoded
+(`…/my%20file.cpp` → `my file.cpp`); an extension-less segment gets `.utf8` (`…/foo` → `foo.utf8`). Re-fetching
+identical content reports `unchanged` and skips the write. The size cap is enforced during download — an oversized
+payload aborts mid-stream and nothing is written. Bodyless responses (204/304/3xx without a location) and terminal
+`206 Partial Content` are refused instead of writing an empty or truncated file, and an `https://` request never
+follows a redirect that downgrades to plain `http://` (plain-http requests follow redirects freely).
 
 ---
 

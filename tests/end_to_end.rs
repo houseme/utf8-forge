@@ -1220,7 +1220,9 @@ fn convert_long_filename_preserves_backup_and_permissions() {
     assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
 }
 
-/// Auto-discovery warnings must be visible in verify as well as scan.
+/// Auto-discovery warnings must be visible in verify as well as scan. A
+/// readable-but-invalid line is skipped with a warning naming the line; when
+/// no usable line remains, the layer is reported inactive (never silently).
 #[test]
 fn verify_reports_invalid_auto_ignore_file_warning() {
     let dir = tempfile::tempdir().unwrap();
@@ -1239,11 +1241,9 @@ fn verify_reports_invalid_auto_ignore_file_warning() {
         if quiet {
             assert!(stderr.is_empty(), "{stderr}");
         } else {
-            assert!(
-                stderr.contains("warning: ignoring unreadable .utf8forgeignore"),
-                "{stderr}"
-            );
-            assert!(stderr.contains("line 1"), "{stderr}");
+            assert!(stderr.contains("line 1 skipped"), "{stderr}");
+            assert!(stderr.contains("empty pattern"), "{stderr}");
+            assert!(stderr.contains("ignore layer is inactive"), "{stderr}");
         }
     }
 }
@@ -1485,4 +1485,470 @@ fn report_target_cannot_be_the_ignore_file() {
     let code = run_tree(Commands::Scan, &args(&root, Some(&ignore)));
     assert_eq!(code, 2, "the ignore file must not become the report target");
     assert_eq!(fs::read(&ignore).unwrap(), before);
+}
+
+#[test]
+fn gb18030_self_misread_output_is_refused_not_written() {
+    // A hanzi whose gb18030 encoding is itself valid UTF-8 must be refused
+    // loudly: writing it would let the next run re-read the file as UTF-8
+    // and silently rewrite the character.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "yi.cpp", "一\n".as_bytes());
+    let report = dir.path().join("r.json");
+    let a = args(&root, Some(&report));
+
+    let code = run_convert(&a, |ca| ca.target = Some(TargetEncoding::Gb18030));
+    assert_eq!(code, 1);
+    // Bytes untouched, error recorded in the encode bucket.
+    assert_eq!(fs::read(root.join("yi.cpp")).unwrap(), "一\n".as_bytes());
+    let doc = read_report(&report);
+    assert_eq!(doc["summary"]["encode_errors"], 1);
+    assert_eq!(doc["files"][0]["action"], "error");
+    assert!(
+        doc["files"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("read back as different characters")
+    );
+    // The rerun is identical (the refusal is deterministic).
+    let report2 = dir.path().join("r2.json");
+    let a2 = args(&root, Some(&report2));
+    let code = run_convert(&a2, |ca| ca.target = Some(TargetEncoding::Gb18030));
+    assert_eq!(code, 1);
+    assert_eq!(fs::read(root.join("yi.cpp")).unwrap(), "一\n".as_bytes());
+}
+
+#[test]
+fn report_spelling_variant_cannot_target_the_ignore_file() {
+    // `./tree/.utf8forgeignore` and `tree/.utf8forgeignore` differ as raw
+    // paths but name the same file; the guard must refuse both spellings.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    put(&root, ".utf8forgeignore", b"nothing-else\n");
+    let before = fs::read(root.join(".utf8forgeignore")).unwrap();
+
+    let mut a = args(&root, None);
+    a.report = Some(dir.path().join("./tree/.utf8forgeignore"));
+    let code = run_tree(Commands::Scan, &a);
+    assert_eq!(code, 2);
+    assert_eq!(fs::read(root.join(".utf8forgeignore")).unwrap(), before);
+}
+
+#[test]
+fn auto_ignore_file_with_unsupported_line_keeps_the_other_rules() {
+    // One gitignore-habit bracket line must not disable the remaining
+    // rules; it is skipped with a warning naming the line.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, ".utf8forgeignore", b"skipme/\n[Tt]est*\n");
+    put(&root, "skipme/s.cpp", UTF8);
+
+    let mut a = args(&root, None);
+    a.ignore_file = None;
+    let code = run_tree(Commands::Scan, &a);
+    assert_eq!(code, 0);
+    // skipme/ was excluded → the file never entered the report.
+    let doc_path = dir.path().join("scan.json");
+    let mut a = args(&root, Some(&doc_path));
+    a.report = Some(doc_path.clone());
+    run_tree(Commands::Scan, &a);
+    let doc = read_report(&doc_path);
+    assert_eq!(doc["summary"]["total_files"], 0);
+    assert!(
+        doc["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("line 2 skipped"),
+        "{}",
+        doc["warnings"]
+    );
+    // And convert must not rewrite the excluded file.
+    let code = run_convert(&args(&root, None), |_| {});
+    assert_eq!(code, 0);
+    assert_eq!(fs::read(root.join("skipme/s.cpp")).unwrap(), UTF8);
+}
+
+#[test]
+fn explicit_ignore_file_with_unsupported_line_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    put(&root, "rules", b"[Tt]est*\n");
+    let mut a = args(&root, None);
+    a.ignore_file = Some(root.join("rules"));
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+}
+
+/// The SIGPIPE signal number (13) without linking libc from the test crate.
+fn libc_const_sigpipe() -> i32 {
+    13
+}
+
+/// Capture stderr of a real binary run (in-process `run()` prints to the
+/// process stderr, which tests cannot intercept).
+fn run_capture(args: &[&str], cwd: &Path) -> (i32, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn fix_prints_one_problem_line_per_unknown_file() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "broken.cpp", &[0xFF, 0xFF, 0xFF]);
+    put(dir.path(), "ok.cpp", b"ascii\n");
+    let root = dir.path().to_string_lossy().into_owned();
+    let (code, stderr) = run_capture(&["fix", "--root", &root], dir.path());
+    assert_eq!(code, 3);
+    // Exactly one stderr line names the file (the convert row's `unknown`
+    // line, not a second `failed ... (detected=unknown)` gate line).
+    assert_eq!(stderr.matches("broken.cpp").count(), 1, "{stderr}");
+    assert!(stderr.contains("unknown"), "{stderr}");
+    assert!(!stderr.contains("failed"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_prints_every_traversal_warning_not_just_the_last() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "lock1/a.cpp", b"ascii");
+    put(dir.path(), "lock2/b.cpp", b"ascii");
+    fs::set_permissions(dir.path().join("lock1"), fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(dir.path().join("lock2"), fs::Permissions::from_mode(0o000)).unwrap();
+    let (code, stderr) = run_capture(&["verify", "--root", "."], dir.path());
+    fs::set_permissions(dir.path().join("lock1"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(dir.path().join("lock2"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 3);
+    let count = stderr.matches("walk warning").count();
+    assert_eq!(count, 2, "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn stdout_pipe_cut_keeps_the_report_and_exits_quietly() {
+    // `scan -v | head`: SIGPIPE must terminate the process conventionally
+    // (141) without a panic, and the report must already be durable.
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..20 {
+        put(dir.path(), &format!("f{i}.cpp"), b"ascii");
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .args(["scan", "--root", ".", "--verbose", "--report", "scan.json"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut probe = [0u8; 64];
+    let _ = stdout.read(&mut probe); // one line is enough
+    drop(stdout); // close the pipe; the next println gets SIGPIPE
+    let status = child.wait().unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc_const_sigpipe()),
+        "conventional SIGPIPE death, not a panic"
+    );
+    assert!(dir.path().join("scan.json").exists());
+    let doc = read_report(&dir.path().join("scan.json"));
+    assert_eq!(doc["summary"]["total_files"], 20);
+}
+
+#[cfg(unix)]
+#[test]
+fn stderr_pipe_cut_keeps_the_report() {
+    // Warnings/problem lines print only after the report write, so cutting
+    // stderr cannot drop the report either.
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "broken.cpp", &[0xFF, 0xFF, 0xFF]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .args(["fix", "--root", ".", "--report", "fix.json"])
+        .current_dir(dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut probe = [0u8; 16];
+    let _ = stderr.read(&mut probe);
+    drop(stderr);
+    let _ = child.wait().unwrap();
+    assert!(dir.path().join("fix.json").exists());
+}
+
+#[test]
+fn convert_default_args_honor_config_target() {
+    // Programmatic defaults carry no target preference, so a config-supplied
+    // target must reach the conversion.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    let cfg = dir.path().join("utf8-forge.toml");
+    fs::write(&cfg, "[convert]\ntarget = \"utf-8-bom\"\n").unwrap();
+    let report = dir.path().join("r.json");
+    let mut a = args(&root, Some(&report));
+    a.config = Some(cfg);
+    let code = run_convert(&a, |_| {});
+    assert_eq!(code, 0);
+    assert_eq!(
+        fs::read(root.join("a.cpp")).unwrap()[..3],
+        [0xEF, 0xBB, 0xBF]
+    );
+    let doc = read_report(&report);
+    assert_eq!(doc["options"]["target"], "utf-8-bom");
+}
+
+#[test]
+fn exclude_glob_grammar_rejection_is_fatal_with_named_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.cpp", b"ascii");
+    let mut a = args(dir.path(), None);
+    a.exclude_glob = vec!["[Tt]est*".into()];
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+}
+
+#[test]
+fn empty_and_blank_backup_dir_values_are_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.cpp", b"ascii");
+    let code = run_convert(&args(dir.path(), None), |ca| {
+        ca.backup_dir = Some(std::path::PathBuf::from(" "))
+    });
+    assert_eq!(code, 2);
+    assert!(!dir.path().join(" ").exists());
+}
+
+#[test]
+fn clap_rejects_conflicting_ignore_flags_and_empty_values() {
+    use clap::Parser;
+    assert!(
+        Cli::try_parse_from([
+            "utf8-forge",
+            "scan",
+            "--ignore-file",
+            "x",
+            "--no-ignore-file"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["utf8-forge", "convert", "--report", ""]).is_err());
+    assert!(Cli::try_parse_from(["utf8-forge", "convert", "--backup-dir", ""]).is_err());
+}
+
+#[test]
+fn convert_url_with_backup_dir_is_fatal_before_network() {
+    let ca = ConvertArgs {
+        url: Some("http://127.0.0.1:9/never.cpp".into()),
+        backup_dir: Some(std::path::PathBuf::from("bk")),
+        ..ConvertArgs::default()
+    };
+    assert_eq!(utf8_forge::run(Cli::from(Commands::Convert(ca))), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_existing_backup_dir_is_fatal_before_conversion() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", GBK);
+    let backup = dir.path().join("bk");
+    fs::create_dir(&backup).unwrap();
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o555)).unwrap();
+    let code = run_convert(&args(&root, None), |ca| {
+        ca.backup_dir = Some(backup.clone())
+    });
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 2);
+    assert_eq!(fs::read(root.join("a.cpp")).unwrap(), GBK, "tree untouched");
+}
+
+#[test]
+fn invalid_extension_values_are_fatal_with_examples() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.cpp", b"ascii");
+    for bad in ["..h", ".cpp/", "tar.gz"] {
+        let mut a = args(dir.path(), None);
+        a.ext = vec![bad.into()];
+        assert_eq!(run_tree(Commands::Scan, &a), 2, "value {bad}");
+    }
+}
+
+#[test]
+fn config_only_include_rc_conflict_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    let cfg = dir.path().join("c.toml");
+    fs::write(&cfg, "[filter]\ninclude_rc = true\n").unwrap();
+    let mut a = args(&root, None);
+    a.config = Some(cfg);
+    a.exclude_ext = vec!["rc".into()];
+    assert_eq!(run_tree(Commands::Scan, &a), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_whitelisted_unreadable_file_is_skipped_without_io_noise() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.cpp", b"ascii");
+    put(dir.path(), "logo.png", b"\x89PNG");
+    fs::set_permissions(
+        dir.path().join("logo.png"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let report = dir.path().join("r.json");
+    let code = run_tree(Commands::Scan, &args(dir.path(), Some(&report)));
+    fs::set_permissions(
+        dir.path().join("logo.png"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    let doc = read_report(&report);
+    assert_eq!(doc["summary"]["total_files"], 1);
+    assert_eq!(doc["summary"]["errors"], 0);
+}
+
+#[test]
+fn cross_mode_diff_warns_but_compares() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", GBK);
+    let scan_report = dir.path().join("scan.json");
+    run_tree(Commands::Scan, &args(&root, Some(&scan_report)));
+    let conv_report = dir.path().join("conv.json");
+    run_convert(&args(&root, Some(&conv_report)), |_| {});
+    let (code, stderr) = run_capture(
+        &["diff", "--before", "scan.json", "--after", "conv.json"],
+        dir.path(),
+    );
+    assert_eq!(code, 0);
+    assert!(stderr.contains("modes differ"), "{stderr}");
+}
+
+#[test]
+fn double_bom_utf16_converges_in_exactly_two_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    let double_bom: &[u8] = &[0xFF, 0xFE, 0xFF, 0xFE, b'h', 0, b'i', 0];
+    put(&root, "db.cpp", double_bom);
+    let expect_converted = |report: &Path| {
+        let doc = read_report(report);
+        doc["summary"]["converted"].as_u64().unwrap()
+    };
+    let r1 = dir.path().join("1.json");
+    run_convert(&args(&root, Some(&r1)), |_| {});
+    assert_eq!(expect_converted(&r1), 1);
+    let r2 = dir.path().join("2.json");
+    run_convert(&args(&root, Some(&r2)), |_| {});
+    assert_eq!(expect_converted(&r2), 1);
+    let r3 = dir.path().join("3.json");
+    let code = run_convert(&args(&root, Some(&r3)), |_| {});
+    assert_eq!(code, 0);
+    assert_eq!(expect_converted(&r3), 0);
+    assert_eq!(fs::read(root.join("db.cpp")).unwrap(), b"hi");
+}
+
+#[test]
+fn help_shows_the_exit_code_contract() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Exit codes"), "{text}");
+    assert!(text.contains("3"), "{text}");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .args(["verify", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8(out.stdout).unwrap().contains('3'));
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_report_name_stays_out_of_the_scanned_files() {
+    // A bare `--report r.json` (no directory component) must be excluded
+    // from traversal across runs; runs as a subprocess so the cwd-relative
+    // report resolves inside the tree.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", b"ascii");
+    let run_scan = || {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+            .args(["scan", "--root", "tree", "--report", "r.json"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        serde_json::from_str::<Value>(&fs::read_to_string(dir.path().join("r.json")).unwrap())
+            .unwrap()
+    };
+    let first = run_scan();
+    let second = run_scan();
+    assert_eq!(first["summary"]["total_files"], 1);
+    assert_eq!(
+        first["summary"]["total_files"],
+        second["summary"]["total_files"]
+    );
+}
+
+#[test]
+fn threads_zero_clamps_to_one_and_still_converts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", GBK);
+    put(&root, "b.cpp", GBK);
+    let mut a = args(&root, None);
+    a.threads = Some(0);
+    assert_eq!(run_convert(&a, |_| {}), 0);
+    assert_eq!(fs::read(root.join("a.cpp")).unwrap(), UTF8);
+    assert_eq!(fs::read(root.join("b.cpp")).unwrap(), UTF8);
+}
+
+#[test]
+fn real_report_json_deserializes_into_the_typed_report() {
+    // Downstream tools parse reports with the crate's own Deserialize impls;
+    // exercise one real emitted fix report end to end.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    put(&root, "a.cpp", GBK);
+    put(&root, "broken.cpp", &[0xFF, 0xFF, 0xFF]);
+    let report = dir.path().join("fix.json");
+    let fa = FixArgs {
+        common: args(&root, Some(&report)),
+        ..FixArgs::default()
+    };
+    let code = utf8_forge::run(Cli::from(Commands::Fix(fa)));
+    assert_eq!(code, 3);
+    let text = fs::read_to_string(&report).unwrap();
+    let parsed: utf8_forge::reporter::Report = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed.mode, "fix");
+    assert_eq!(parsed.files.len(), 2);
+    match &parsed.summary {
+        utf8_forge::reporter::Summary::Fix(s) => {
+            assert_eq!(s.converted, 1);
+            assert_eq!(s.failed, 1);
+            let expected = root.join("broken.cpp").to_string_lossy().into_owned();
+            assert_eq!(parsed.verify_failed_files, vec![expected]);
+        }
+        other => panic!("fix summary expected, got {other:?}"),
+    }
 }

@@ -270,8 +270,9 @@ pub fn transcode(bytes: &[u8], target: TargetEncoding) -> Result<TranscodeOutcom
 /// zero allocation. Otherwise strict-decode, encode, and compare: a
 /// byte-identical result is reported as `Unchanged` so callers skip the write
 /// and a second pass over the same tree touches no file. Encoding refusals
-/// ([`ForgeError::EncodeError`] — the UTF-16LE NUL guard and the GB18030
-/// unmappable scalar) come from [`encode`] and never write mojibake.
+/// ([`ForgeError::EncodeError`] — the UTF-16LE NUL guard, the GB18030
+/// unmappable scalar, and the GB18030 self-misread guard below) never write
+/// mojibake.
 pub fn transcode_detected(
     bytes: &[u8],
     detected: DetectedEncoding,
@@ -283,10 +284,30 @@ pub fn transcode_detected(
     let text = decode_strict(bytes, detected)?;
     let encoded = encode(&text, target)?;
     if encoded == bytes {
-        Ok(TranscodeOutcome::Unchanged)
-    } else {
-        Ok(TranscodeOutcome::Changed(encoded))
+        return Ok(TranscodeOutcome::Unchanged);
     }
+    // A gb18030 output that the next run would re-detect as UTF-8 is only
+    // safe when reading it back as UTF-8 and re-encoding yields the same
+    // bytes (then the next run sees `Unchanged`). When it does not, the next
+    // run silently rewrites different characters into the file — 1920 hanzi
+    // encode this way, e.g. U+4E00 一 → D2 BB, which reads back as U+04BB һ
+    // and re-encodes to a 4-byte sequence. Refuse to create that drift,
+    // mirroring the UTF-16LE NUL guard; outputs that cannot be valid UTF-8
+    // (ASCII aside) are unambiguous and convert freely, and a file already
+    // holding unambiguous gb18030 bytes re-encodes byte-identically through
+    // the `Unchanged` path above.
+    if target == TargetEncoding::Gb18030
+        && let Some(retext) = std::str::from_utf8(&encoded).ok()
+        && encode(retext, TargetEncoding::Gb18030).is_ok_and(|re_encoded| re_encoded != encoded)
+    {
+        return Err(ForgeError::EncodeError(
+            "gb18030 output would itself be read back as different characters on the next \
+             run (many common hanzi encode that way, e.g. U+4E00 → D2 BB, which re-reads as \
+             U+04BB һ); refusing to write output the tool itself would silently rewrite"
+                .into(),
+        ));
+    }
+    Ok(TranscodeOutcome::Changed(encoded))
 }
 
 #[cfg(test)]
@@ -365,5 +386,80 @@ mod tests {
             transcode(b"plain ascii", TargetEncoding::Gb18030).unwrap(),
             TranscodeOutcome::Unchanged
         );
+    }
+
+    #[test]
+    fn gb18030_output_that_re_reads_as_utf8_is_refused() {
+        // 一 encodes to D2 BB, which is valid UTF-8 (U+04BB); writing it
+        // would make the next run misread the file as UTF-8 and rewrite the
+        // character, so the transcode is refused instead.
+        let err = transcode("一\n".as_bytes(), TargetEncoding::Gb18030).unwrap_err();
+        assert!(matches!(err, ForgeError::EncodeError(_)), "{err}");
+    }
+
+    #[test]
+    fn gb18030_output_that_cannot_be_utf8_still_converts() {
+        // 命 encodes to C3 FC, which is not valid UTF-8, so the output is
+        // unambiguous and must convert normally.
+        let out = match transcode("命\n".as_bytes(), TargetEncoding::Gb18030).unwrap() {
+            TranscodeOutcome::Changed(v) => v,
+            other => panic!("must change, got {other:?}"),
+        };
+        assert_eq!(out, b"\xC3\xFC\x0A");
+    }
+
+    #[test]
+    fn existing_4_byte_gb18030_stays_unchanged() {
+        // һ (U+04BB) already sits in its 4-byte gb18030 spelling; the
+        // re-encode is byte-identical and must not trip the ambiguity
+        // refusal (which only guards *changed* output).
+        let bytes = [0x81, 0x30, 0xDD, 0x35, b'\n'];
+        assert_eq!(
+            transcode(&bytes, TargetEncoding::Gb18030).unwrap(),
+            TranscodeOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn gb18030_ambiguity_policy_matches_full_scalar_oracle() {
+        // For every scalar: byte-identical output stays Unchanged; output
+        // the next run would read back identically converts; output the next
+        // run would silently rewrite must be refused; everything else
+        // converts. U+E5E5 is the single unmappable scalar, and U+FEFF's
+        // UTF-8 spelling is the BOM, so its input detection differs.
+        for cp in 0x20u32..0x11_0000 {
+            if (0xD800..=0xDFFF).contains(&cp) {
+                continue; // Surrogates are not scalars.
+            }
+            let text = format!("{}\n", char::from_u32(cp).unwrap());
+            let Ok(encoded) = encode(&text, TargetEncoding::Gb18030) else {
+                assert_eq!(cp, 0xE5E5, "only U+E5E5 is unmappable");
+                continue;
+            };
+            // The next-run simulation: read the output back as UTF-8 (as
+            // the detector would) and re-encode.
+            let reread_stable = std::str::from_utf8(&encoded).is_ok_and(|retext| {
+                encode(retext, TargetEncoding::Gb18030).is_ok_and(|re| re == encoded)
+            });
+            let outcome = transcode(text.as_bytes(), TargetEncoding::Gb18030);
+            if encoded == text.as_bytes() {
+                assert_eq!(outcome.unwrap(), TranscodeOutcome::Unchanged, "U+{cp:04X}");
+            } else if reread_stable {
+                assert!(
+                    matches!(outcome, Ok(TranscodeOutcome::Changed(_))),
+                    "U+{cp:04X} must convert (stable reread)"
+                );
+            } else if std::str::from_utf8(&encoded).is_ok() {
+                assert!(
+                    matches!(outcome, Err(ForgeError::EncodeError(_))),
+                    "U+{cp:04X} must be refused"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, Ok(TranscodeOutcome::Changed(_))),
+                    "U+{cp:04X} must convert"
+                );
+            }
+        }
     }
 }

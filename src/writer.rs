@@ -45,7 +45,32 @@ pub(crate) fn unique_suffix() -> String {
 /// The temp file is created in the destination's parent directory (same
 /// volume, so rename is atomic), given the original's permissions, fsynced,
 /// then renamed over the destination. Temp leftovers are cleaned up on error.
+/// An existing destination that is a symlink or not a regular file is
+/// refused: rename would silently replace the entry itself (the link or the
+/// FIFO) while the operator's target keeps stale content.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ForgeError> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            return Err(ForgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "destination `{}` is a symlink; refusing to replace the link itself \
+                     (remove the link or point the output elsewhere)",
+                    path.display()
+                ),
+            )));
+        }
+        if !file_type.is_file() {
+            return Err(ForgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "destination `{}` is not a regular file; refusing to replace it",
+                    path.display()
+                ),
+            )));
+        }
+    }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -88,7 +113,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ForgeError> {
 }
 
 /// Copy the original bytes of `path` into `backup_dir`, mirroring the
-/// tree structure relative to `root`.
+/// tree structure relative to `root`, and carry the source file's permission
+/// bits over to the backup (the rollback copy stays executable/private the
+/// way the original was).
 ///
 /// Called *before* the converted bytes are renamed into place, so the backup
 /// always holds the pre-conversion content and stays replayable.
@@ -112,7 +139,16 @@ pub fn backup_original(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    atomic_write(&target, original)
+    atomic_write(&target, original)?;
+    // The write above copies the *destination's* metadata, which does not
+    // exist on a first-time backup — apply the source's mode afterwards so a
+    // 750 original does not restore as a 644 backup. A failure here is loud:
+    // bytes are already safe, but the operator must know the mode drifted.
+    let perms = fs::metadata(path).map(|m| m.permissions());
+    if let Ok(perms) = perms {
+        fs::set_permissions(&target, perms)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -150,18 +186,6 @@ mod tests {
         let p2 = dir.path().join("c.txt");
         atomic_write(&p2, b"x").unwrap();
         assert_eq!(fs::read(&p2).unwrap(), b"x");
-    }
-
-    #[test]
-    fn failed_rename_cleans_up_temp_and_keeps_destination() {
-        let dir = tempfile::tempdir().unwrap();
-        let destination = dir.path().join("occupied");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("original"), b"old").unwrap();
-
-        assert!(atomic_write(&destination, b"replacement").is_err());
-        assert_eq!(fs::read(destination.join("original")).unwrap(), b"old");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -208,5 +232,59 @@ mod tests {
         fs::write(&src, b"x").unwrap();
         let res = backup_original(root.path(), &src, backup.path(), b"x");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn existing_directory_destination_is_refused_without_temp_leftovers() {
+        // rename() could never replace a directory; the pre-write check now
+        // refuses it with a clear message instead of a raw OS error.
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("occupied");
+        fs::create_dir(&destination).unwrap();
+        let err = atomic_write(&destination, b"replacement").unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(destination.is_dir());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_destination_is_refused_and_link_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.cpp");
+        fs::write(&target, b"original").unwrap();
+        let link = dir.path().join("link.cpp");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = atomic_write(&link, b"replacement").unwrap_err();
+        assert!(err.to_string().contains("is a symlink"), "{err}");
+        // Neither the link nor its target may be touched.
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&link).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_preserves_source_permission_bits() {
+        let root = tempfile::tempdir().unwrap();
+        let backup = tempfile::tempdir().unwrap();
+        let src = root.path().join("s.cpp");
+        fs::write(&src, b"content").unwrap();
+        let mut perms = fs::metadata(&src).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o740);
+        fs::set_permissions(&src, perms).unwrap();
+        backup_original(root.path(), &src, backup.path(), b"content").unwrap();
+        let backed = backup.path().join("s.cpp");
+        assert_eq!(fs::read(&backed).unwrap(), b"content");
+        assert_eq!(
+            fs::metadata(&backed).unwrap().permissions().mode() & 0o777,
+            0o740
+        );
     }
 }

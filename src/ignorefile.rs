@@ -55,47 +55,104 @@ pub struct IgnoreFile {
     patterns: Vec<IgnorePattern>,
 }
 
+/// Outcome of parsing one line: a compiled pattern, nothing (blank/comment),
+/// or a rejection reason.
+enum Line {
+    Pattern(IgnorePattern),
+    Skip,
+    Invalid(String),
+}
+
+/// Parse one line per iteration, yielding the 1-based line number with its
+/// outcome. Shared by the strict and lenient parsers so their grammars can
+/// never drift apart.
+fn parse_lines(text: &str) -> impl Iterator<Item = (usize, Line)> {
+    text.lines().enumerate().map(|(idx, raw_line)| {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return (idx + 1, Line::Skip);
+        }
+        let mut rest = line;
+        let negated = rest.starts_with('!');
+        if negated {
+            rest = &rest[1..];
+        }
+        let dir_only = rest.ends_with('/');
+        if dir_only {
+            rest = rest.trim_end_matches('/');
+        }
+        let anchored = rest.contains('/');
+        let rest = rest.trim_start_matches('/');
+        if rest.is_empty() {
+            return (idx + 1, Line::Invalid("empty pattern".into()));
+        }
+        match Glob::compile_raw(rest) {
+            Ok(glob) => (
+                idx + 1,
+                Line::Pattern(IgnorePattern {
+                    glob,
+                    negated,
+                    dir_only,
+                    anchored,
+                }),
+            ),
+            Err(reason) => (idx + 1, Line::Invalid(reason)),
+        }
+    })
+}
+
 impl IgnoreFile {
+    /// True when no patterns survived parsing — the lenient loader uses this
+    /// to report that the ignore layer is inactive when every line was
+    /// invalid.
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
     /// Parse and compile the file at `path`. `Err` names the 1-based line
-    /// number for invalid patterns (empty effective pattern, lone `/` or `!`).
+    /// number for invalid patterns (empty effective pattern, lone `/` or `!`,
+    /// or the `[`/`{` constructs this grammar rejects).
     pub fn load(path: &Path) -> Result<IgnoreFile, String> {
         let text = fs::read_to_string(path)
             .map_err(|e| format!("cannot read ignore file `{}`: {e}", path.display()))?;
         Self::parse(&text)
     }
 
-    /// Parse ignore rules from raw text (exposed for tests).
+    /// Parse ignore rules from raw text. Any invalid line fails the whole
+    /// file — the posture for an explicitly named `--ignore-file`.
     pub fn parse(text: &str) -> Result<IgnoreFile, String> {
         let mut patterns = Vec::new();
-        for (idx, raw_line) in text.lines().enumerate() {
-            let line = raw_line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+        for (idx, line) in parse_lines(text) {
+            match line {
+                Line::Pattern(pattern) => patterns.push(pattern),
+                Line::Invalid(reason) => {
+                    return Err(format!("ignore file line {}: {reason}", idx));
+                }
+                Line::Skip => {}
             }
-            let mut rest = line;
-            let negated = rest.starts_with('!');
-            if negated {
-                rest = &rest[1..];
-            }
-            let dir_only = rest.ends_with('/');
-            if dir_only {
-                rest = rest.trim_end_matches('/');
-            }
-            let anchored = rest.contains('/');
-            let rest = rest.trim_start_matches('/');
-            if rest.is_empty() {
-                return Err(format!("ignore file line {}: empty pattern", idx + 1));
-            }
-            let glob = Glob::compile_raw(rest)
-                .map_err(|e| format!("ignore file line {}: {e}", idx + 1))?;
-            patterns.push(IgnorePattern {
-                glob,
-                negated,
-                dir_only,
-                anchored,
-            });
         }
         Ok(IgnoreFile { patterns })
+    }
+
+    /// Parse ignore rules from raw text, skipping invalid lines with a
+    /// per-line warning instead of failing the whole file — the posture for
+    /// the auto-discovered `<root>/.utf8forgeignore`, where one unsupported
+    /// line (e.g. a gitignore `[Tt]est*` habit) must not silently disable
+    /// every other rule the operator wrote. Returns the surviving rules and
+    /// one warning per skipped line (1-based line number included).
+    pub fn parse_lenient(text: &str) -> (IgnoreFile, Vec<String>) {
+        let mut patterns = Vec::new();
+        let mut warnings = Vec::new();
+        for (idx, line) in parse_lines(text) {
+            match line {
+                Line::Pattern(pattern) => patterns.push(pattern),
+                Line::Invalid(reason) => {
+                    warnings.push(format!("ignore file line {idx} skipped: {reason}"));
+                }
+                Line::Skip => {}
+            }
+        }
+        (IgnoreFile { patterns }, warnings)
     }
 
     /// Last-match-wins verdict for a root-relative path split into
@@ -218,5 +275,36 @@ mod tests {
     fn double_star_spans_components() {
         assert!(ign("**/Generated/**", "a/Generated/x.cpp", false));
         assert!(ign("**/Generated/**", "Generated/y.cpp", false));
+    }
+
+    #[test]
+    fn strict_parse_rejects_bracket_constructs() {
+        // The grammar has no character classes; an explicit --ignore-file
+        // must fail loudly instead of compiling the line as a literal.
+        let err = IgnoreFile::parse("[Tt]est*").unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
+        assert!(err.contains("grammar"), "{err}");
+    }
+
+    #[test]
+    fn lenient_parse_keeps_surviving_lines_and_names_skipped_ones() {
+        let text = "skipme/\n[Tt]est*\n*.tmp\n!";
+        let (rules, warnings) = IgnoreFile::parse_lenient(text);
+        // skipme/ and *.tmp survive; the bracket line and the lone ! are
+        // skipped with line-numbered warnings.
+        assert!(rules.ignores(&["skipme"], true));
+        assert!(rules.ignores(&["x.tmp"], false));
+        assert!(!rules.ignores(&["tEst.txt"], false));
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("line 2"), "{warnings:?}");
+        assert!(warnings[0].contains("grammar"), "{warnings:?}");
+        assert!(warnings[1].contains("line 4"), "{warnings:?}");
+    }
+
+    #[test]
+    fn lenient_parse_of_a_fully_valid_file_has_no_warnings() {
+        let (rules, warnings) = IgnoreFile::parse_lenient("# c\n\nlogs/\n*.tmp\n");
+        assert!(rules.ignores(&["logs"], true));
+        assert!(warnings.is_empty());
     }
 }

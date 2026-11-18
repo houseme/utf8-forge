@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::Path;
 
-use utf8_forge::filter::{FilterConfig, FilterOptions, Glob, extension_of};
+use utf8_forge::filter::{FilterConfig, FilterOptions, FilterSources, Glob, extension_of};
 use utf8_forge::walker::collect_files;
 
 /// Write bytes to `root/rel`, creating parent directories.
@@ -33,7 +33,7 @@ fn put(root: &Path, rel: &str, bytes: &[u8]) {
 /// Walk a fresh filter config over the tree, returning sorted file names
 /// relative to `root`.
 fn walk(root: &Path, opts: &FilterOptions) -> Vec<String> {
-    let cfg = FilterConfig::build(opts, "--ext").unwrap();
+    let cfg = FilterConfig::build(opts, &FilterSources::CLI).unwrap();
     let res = collect_files(root, &cfg, &[], None);
     res.files
         .iter()
@@ -226,7 +226,7 @@ fn leading_dot_ext_values_match() {
         ext_override: vec![".md".into(), ".Hpp".into()],
         ..Default::default()
     };
-    let cfg = FilterConfig::build(&opts, "--ext").unwrap();
+    let cfg = FilterConfig::build(&opts, &FilterSources::CLI).unwrap();
     assert!(cfg.extensions.contains("md"));
     assert!(cfg.extensions.contains("hpp"));
 }
@@ -263,7 +263,7 @@ fn complex_glob_excludes_files_through_both_filter_layers() {
     };
     assert_eq!(walk(dir.path(), &opts), vec!["keep.cpp"]);
 
-    let config = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
+    let config = FilterConfig::build(&FilterOptions::default(), &FilterSources::CLI).unwrap();
     let ignore = utf8_forge::ignorefile::IgnoreFile::parse(&pattern).unwrap();
     let result = collect_files(dir.path(), &config, &[], Some(&ignore));
     assert!(result.warnings.is_empty());
@@ -275,4 +275,55 @@ fn extension_of_lowercases_and_handles_multi_dot() {
     assert_eq!(extension_of(Path::new("a/b/c.CPP")), Some("cpp".into()));
     assert_eq!(extension_of(Path::new("x.Ts")), Some("ts".into()));
     assert_eq!(extension_of(Path::new("Makefile")), None);
+}
+
+#[test]
+fn exclude_dirs_override_replaces_the_default_set() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "vendor/lib.cpp", b"ok");
+    put(root.path(), "dep/lib.cpp", b"ok");
+    put(root.path(), "bin/x.cpp", b"ok");
+    let opts = FilterOptions {
+        exclude_dirs_override: Some(vec!["bin".into()]),
+        ..FilterOptions::default()
+    };
+    // Only `bin` is excluded now: the defaults (vendor, dep) are replaced.
+    assert_eq!(
+        walk(root.path(), &opts),
+        vec!["dep/lib.cpp", "vendor/lib.cpp"]
+    );
+}
+
+#[test]
+fn root_named_like_an_excluded_dir_is_still_scanned() {
+    // The explicitly given root is exempt from its own exclusion rules,
+    // while same-named children inside remain pruned.
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("build");
+    put(&root, "a.cpp", b"ok");
+    put(&root, "build/b.cpp", b"pruned");
+    put(&root, "target/c.cpp", b"pruned");
+    assert_eq!(walk(&root, &default_opts()), vec!["a.cpp"]);
+}
+
+#[test]
+fn ignore_rules_and_hidden_gate_interact_safely() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "keep.md", b"ok");
+    put(root.path(), ".hidden.md", b"ok");
+    put(root.path(), "plain.cpp", b"ok");
+    let opts = FilterOptions {
+        include_hidden: true,
+        ..FilterOptions::default()
+    };
+    let cfg = FilterConfig::build(&opts, &FilterSources::CLI).unwrap();
+    let rules = utf8_forge::ignorefile::IgnoreFile::parse("*.md\n").unwrap();
+    let res = collect_files(root.path(), &cfg, &[], Some(&rules));
+    let names: Vec<String> = res
+        .files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    // Both markdown files (hidden included) are ignored; the .cpp survives.
+    assert_eq!(names, vec!["plain.cpp"]);
 }

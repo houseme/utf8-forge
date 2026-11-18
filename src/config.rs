@@ -92,8 +92,13 @@ pub struct OptionsSection {
 }
 
 /// Load and parse the config file at `path`. Fatal on missing / unreadable /
-/// malformed input (exit 2) — the caller treats any `Err` as fatal.
+/// malformed input (exit 2) — the caller treats any `Err` as fatal. A path
+/// that exists but is a directory (or another non-file entry) is named as
+/// such instead of pretending it does not exist.
 pub fn load(path: &Path) -> anyhow::Result<ForgeConfig> {
+    if path.is_dir() {
+        bail!("config file `{}` is a directory", path.display());
+    }
     if !path.is_file() {
         bail!("config file `{}` not found", path.display());
     }
@@ -174,5 +179,13 @@ typo_key = 1
         let cfg: ForgeConfig = toml::from_str("[convert]\ntarget = \"gbk\"\n").unwrap();
         let err = cfg.target().unwrap_err().to_string();
         assert!(err.contains("[convert].target"), "{err}");
+    }
+
+    #[test]
+    fn directory_path_is_named_as_such_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("is a directory"), "{err}");
+        assert!(!err.contains("not found"), "{err}");
     }
 }

@@ -49,14 +49,16 @@ cargo build --release
 | `convert`       | Detect + transcode + atomic write             | ✅ (unless `--dry-run`) | `--target/--dry-run/--backup-dir` are convert/fix-only             | 0 / 1 / 2* |
 | `convert --url` | Fetch → transcode → save                      |           ✅            | `--url/--output`; `--target/--dry-run` allowed, `--root` ignored   | 0 / 1 / 2* |
 | `verify`        | Assert all whitelisted files are UTF-8 no BOM |           ❌            | —                                                                  | 0 / 3‡ / 2* |
-| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target` (utf-8 only) / `--dry-run` / `--backup-dir`; no `--url/--output` | 0 / 3‡ / 1 / 2* |
+| `fix`           | Convert + verify in one pass, no re-walk      | ✅ (unless `--dry-run`) | Tree flags + `--target` (utf-8 only) / `--dry-run` / `--backup-dir`; no `--url/--output` | 0 / 3‡ / 2* |
 | `diff`          | Compare two reports per path                  |           ❌            | `--before/--after/--report/--fail-on-change`; reads JSON, writes nothing else | 0 / 1† / 2* |
 
 \* `2` = fatal setup/parse errors (missing root, bad flags, conflicts); also emitted by clap. `scan` and `verify`
 **reject** the convert/fix-only flags `--target` / `--dry-run` / `--backup-dir` with exit 2.
 † `1` only with `--fail-on-change` on a non-empty diff; otherwise `diff` exits 0 even with differences.
 ‡ `3` = the verify gate failed: non-UTF-8 files, oversized/unreadable files (fail-closed), or traversal could not
-inspect part of the tree; `fix` lists gate failures in `verify_failed_files`.
+inspect part of the tree; `fix` lists gate failures in `verify_failed_files`. (`fix`'s historical exit-1 arm is
+unreachable in practice — every convert-side issue also fails the gate on the same bytes — and is kept only as a
+defensive fallback.)
 
 ---
 
@@ -73,7 +75,7 @@ inspect part of the tree; `fix` lists gate failures in `verify_failed_files`.
 | `--include-msbuild` | false           | Adds `.sln/.vcxproj/...`                                         |
 | `--include-hidden`  | false           | Processes dot-prefixed files **and** directories                 |
 | `--config`          | none            | TOML defaults; CLI > config > built-ins; missing/malformed/unknown keys → exit 2; fatal (exit 2) combined with `--url` (fetch reads no config) |
-| `--ignore-file`     | auto            | Gitignore-style exclusions; explicit missing → exit 2; replaces auto-discovery of `<root>/.utf8forgeignore` |
+| `--ignore-file`     | auto            | Gitignore-style exclusions; explicit missing/invalid → exit 2; auto-discovered file skips invalid lines with a warning (remaining rules stay active); replaces auto-discovery of `<root>/.utf8forgeignore` |
 | `--no-ignore-file`  | false           | Disables ignore-file handling entirely, including auto-discovery |
 | `-t, --target`      | `utf-8`         | `utf-8-bom`, `gb18030`, `utf-16le`, `utf-16be` (convert; fix accepts only the default `utf-8`) |
 | `--dry-run`         | false           | No writes (convert, fix)                                         |

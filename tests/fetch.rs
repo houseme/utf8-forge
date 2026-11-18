@@ -504,3 +504,180 @@ fn fetch_refuses_write_protected_destination() {
     // Restore so tempdir cleanup can remove the file.
     fs::set_permissions(&out, fs::Permissions::from_mode(0o644)).unwrap();
 }
+
+#[test]
+fn fetch_bytes_refuses_bodyless_success_statuses() {
+    // 304 and 204 carry no body; materializing one would write a zero-byte
+    // file over an existing output. The refusal fires before any streaming.
+    for status in [204, 304] {
+        let (url, _server) = serve_once(Response {
+            status,
+            content_length: Some(0),
+            body: Vec::new(),
+            close_without_length: false,
+        });
+        let err = fetch_bytes(&url, 200 * 1024 * 1024).unwrap_err();
+        assert_eq!(err.category(), "fetch_error", "status {status}");
+        assert!(
+            err.to_string().contains("no body"),
+            "status {status}: {err}"
+        );
+    }
+}
+
+#[test]
+fn bodyless_refusal_preserves_existing_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("file.cpp");
+    fs::write(&out, b"precious").unwrap();
+    let report = dir.path().join("fetch-report.json");
+    let (url, _server) = serve_once(Response {
+        status: 304,
+        content_length: Some(0),
+        body: Vec::new(),
+        close_without_length: false,
+    });
+    let code = run(Commands::Convert(convert_url_args(url, out.clone(), report, 1024)).into());
+    assert_eq!(code, 1);
+    assert_eq!(fs::read(&out).unwrap(), b"precious");
+}
+
+#[test]
+fn fetch_bytes_refuses_partial_content_206() {
+    // A 206 to a Range-less GET self-declares truncation; the partial body
+    // must not be accepted as the full resource.
+    let (url, _server) = serve_once(Response {
+        status: 206,
+        content_length: Some(2),
+        body: b"he".to_vec(), // half of "hello"
+        close_without_length: false,
+    });
+    let err = fetch_bytes(&url, 200 * 1024 * 1024).unwrap_err();
+    assert_eq!(err.category(), "fetch_error");
+    assert!(err.to_string().contains("partial"), "{err}");
+}
+
+/// Serve one 302 redirect pointing at `target`, then nothing else.
+fn serve_redirect_to(target: &str) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let target = target.to_string();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept failed");
+        drain_request(&mut stream);
+        let head = format!(
+            "HTTP/1.1 302 MOVED\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{addr}/old.cpp"), handle)
+}
+
+#[test]
+fn fetch_follows_same_scheme_redirects() {
+    // Plain-http redirects stay followable (the downgrade gate only applies
+    // to https origins).
+    let (target_url, _target_server) = serve_once(Response {
+        status: 200,
+        content_length: Some(GBK_NIHAO.len()),
+        body: GBK_NIHAO.to_vec(),
+        close_without_length: false,
+    });
+    let (url, _redirect_server) = serve_redirect_to(&target_url);
+    let bytes = fetch_bytes(&url, 200 * 1024 * 1024).unwrap();
+    assert_eq!(bytes, GBK_NIHAO);
+}
+
+#[test]
+fn report_path_equal_to_output_is_fatal_before_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let same = dir.path().join("file.cpp");
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(1),
+        body: b"x".to_vec(),
+        close_without_length: false,
+    });
+    let mut args = convert_url_args(url, same.clone(), dir.path().join("unused.json"), 1024);
+    args.common.report = Some(same.clone());
+    assert_eq!(run(Commands::Convert(args).into()), 2);
+    assert!(!same.exists(), "no request, no output, no report");
+}
+
+#[test]
+fn derived_output_colliding_with_report_is_fatal_before_fetch() {
+    // The derived name lands on the report path even without --output. Runs
+    // as a subprocess with its own cwd (derived names are cwd-relative).
+    let dir = tempfile::tempdir().unwrap();
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(1),
+        body: b"x".to_vec(),
+        close_without_length: false,
+    });
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_utf8-forge"))
+        .args(["convert", "--url", &url, "--report", "file.cpp"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !dir.path().join("file.cpp").exists(),
+        "no request, no output, no report"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_output_symlink_is_refused_and_link_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("real.cpp");
+    fs::write(&target, b"original").unwrap();
+    let link = dir.path().join("link.cpp");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let report = dir.path().join("fetch-report.json");
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(UTF8_NIHAO.len()),
+        body: UTF8_NIHAO.to_vec(),
+        close_without_length: false,
+    });
+    let code = run(Commands::Convert(convert_url_args(url, link.clone(), report, 1024)).into());
+    assert_eq!(code, 1);
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_output_fifo_fails_fast_instead_of_hanging() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.cpp");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let report = dir.path().join("fetch-report.json");
+    let (url, _server) = serve_once(Response {
+        status: 200,
+        content_length: Some(UTF8_NIHAO.len()),
+        body: UTF8_NIHAO.to_vec(),
+        close_without_length: false,
+    });
+    let code = run(Commands::Convert(convert_url_args(url, fifo.clone(), report, 1024)).into());
+    assert_eq!(code, 1);
+    // The FIFO entry itself is preserved (never renamed over).
+    let meta = fs::symlink_metadata(&fifo).unwrap();
+    assert!(!meta.file_type().is_file());
+    assert_eq!(meta.permissions().mode() & 0o170000, 0o010000);
+}

@@ -198,11 +198,14 @@ pub struct ConvertArgs {
 }
 
 impl Default for ConvertArgs {
-    /// Tree-mode defaults with `utf-8` target and no remote fetch.
+    /// Tree-mode defaults with no target preference and no remote fetch —
+    /// `target: None` mirrors the parser so a `[convert].target` config key
+    /// still applies to programmatic runs (`target_or_default()` yields
+    /// utf-8 when nothing else supplies one).
     fn default() -> Self {
         ConvertArgs {
             common: TreeArgs::default(),
-            target: Some(TargetEncoding::Utf8),
+            target: None,
             dry_run: false,
             backup_dir: None,
             url: None,
@@ -248,11 +251,14 @@ pub struct FixArgs {
 }
 
 impl Default for FixArgs {
-    /// Tree-mode defaults with `utf-8` target.
+    /// Tree-mode defaults with no target preference — `target: None` mirrors
+    /// the parser so a `[convert].target` config key still applies to
+    /// programmatic runs (`target_or_default()` yields utf-8 when nothing
+    /// else supplies one).
     fn default() -> Self {
         FixArgs {
             common: TreeArgs::default(),
-            target: Some(TargetEncoding::Utf8),
+            target: None,
             dry_run: false,
             backup_dir: None,
         }

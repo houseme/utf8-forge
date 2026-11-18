@@ -268,5 +268,56 @@ API performs at ~135 ns/convert.
 
 ---
 
-*ROADMAP v0.9 — R1/R2, R5–R10 record previous delivery waves; R11 tracks the
-operator/lib-consumer review of v0.2.4. R3 and R4 retain scope decisions.*
+## R12 — Review-fix wave (v0.2.5, five-lane comprehensive review of the full tree)
+
+Produced from a comprehensive review of HEAD `8236e01` through five lanes:
+encoding/write-path `E1*`, traversal/filter/ignore `E2*`, fetch/CLI/config
+`E3*`, test suite `E4*`, and orchestration/reporting/CI `X*` (orchestrator).
+Every code finding was verified before scheduling — most reproduced
+empirically against the real binary; three candidate findings were disproven
+and dropped (clap 4 rejects empty flag values outright, closing the
+empty-`--report`/`--backup-dir` class; the P0's original character example was
+off — the class itself was re-verified via U+4E00). All repo gates were green
+on the reviewed tree.
+
+Verification of this wave: all gates green (fmt, clippy ×2 feature sets,
+241 all-feature + 202 local-only tests, doc -D warnings, release build);
+a 14-probe empirical battery against the release binary re-ran every finding's
+original scenario (all PASS — the P0 now refuses with `encode_error`, bytes
+untouched, deterministic rerun). The R12.1 guard was refined during
+implementation: the refusal fires only when reading the output back as UTF-8
+and re-encoding would produce *different* bytes (the corruption condition);
+outputs that read back identically (ASCII; a BOM-only file's `
+`) still
+convert — the full-scalar oracle test pins the exact policy.
+
+| # | Priority | Item | Source | Acceptance |
+|---|----------|------|--------|------------|
+| R12.1 | [x] P0 | **gb18030 output that is itself valid UTF-8 is silently rewritten by the next run.** 1920 hanzi (incl. 一, U+4E00 → `D2 BB` = U+04BB һ) encode to gb18030 bytes that decode as UTF-8; a second `convert --target gb18030` re-detects the file as UTF-8 and rewrites it with different characters (measured: 一→һ, both passes exit 0) — silent corruption violating invariant #10, same class as R6.1. Fix: `transcode_detected` refuses with `EncodeError` when a *changed* gb18030 output is valid UTF-8 (after the byte-identical check, so legitimate `Unchanged` passthrough and 4-byte gb18030 stability are unaffected). | E1/X | `一` file + `--target gb18030` → exit 1, `encode_error`, bytes untouched, rerun identical; full-scalar-range oracle pins refuse/unchanged/changed per char; mixed-content files whose output is not valid UTF-8 still convert; DESIGN/README record the refusal |
+| R12.2 | [x] P1 | **`--report` can still overwrite the ignore file via a spelling variant** — `ensure_report_not_ignore` compares raw `Path` equality, so `./tree/.utf8forgeignore` vs `tree/.utf8forgeignore` (or case drift) bypasses the R9.4b guard; measured: rules file replaced by report JSON. Fix: compare canonicalized projections (deepest-existing-ancestor resolution, shared helper). | E2 | `--report ./tree/.utf8forgeignore` → exit 2, rules file intact; identical-spelling behavior unchanged |
+| R12.3 | [x] P1 | **One `[`/`{` line in auto-discovered `.utf8forgeignore` drops the ENTIRE ignore layer** (R11.1 regression on the ignore surface): parse error → treated as "unreadable" → warning-only, all rules discarded, `convert` rewrites "excluded" files (measured, exit 0); warning text also mislabels a readable-but-invalid file. Fix: auto mode parses leniently (invalid lines skipped with line-numbered warnings, remaining rules kept); explicit `--ignore-file` stays fatal; USAGE documents the grammar restriction for both surfaces. | E2 | auto file with `skipme/` + `[Tt]est*` → skipme still excluded, one warning naming line 2, nothing rewritten; explicit file with the same content → exit 2 |
+| R12.4 | [x] P1 | **fetch `--report` == `--output` (or the derived name) silently destroys the fetched artifact**: output written, then the report renames over it; record says `converted`, exit 0 (measured). Fix: canonical-projection pre-flight refusing the collision (exit 2) before any network I/O. | E3 | fetch with derived name == report path → exit 2, no output file, no request |
+| R12.5 | [x] P2 | **fix prints two differently-shaped stderr lines for a `skipped_unknown` file** (`failed X (detected=unknown)` + `unknown X`) — the suppression set only collects `error` rows, contradicting the CHANGELOG 0.2.5 "one problem line per failing file" claim (measured). Fix: suppress the gate line whenever the convert row already reported (`error` or `skipped_unknown`). | X | fix on a tree with an unknown file → exactly one stderr line naming it |
+| R12.6 | [x] P2 | **Warnings/problem lines print before `write_report` in every mode**, so an stderr pipe-cut loses the report (measured: `fix … 2>&1 >/dev/null \| head -1` → no report), deviating from R10.1's "report durable before any console output". Fix: buffer all warnings/gate/problem lines and print them only after the report is written (fetch's immediate too-large line included). | X | pipe-cut run leaves the report on disk; console order otherwise unchanged; unix subprocess pipe test added (also closes the R10.1 automation gap) |
+| R12.7 | [x] P2 | **verify/fix print only the LAST traversal warning when several subtrees are uninspectable** (`gate_warned as usize` coerces the count to 1; measured 1 of 3). Fix: capture `walk.warnings.len()` and slice, as convert already does. | E2 | verify with two unreadable dirs prints both warnings; report/exit unchanged |
+| R12.8 | [x] P2 | **config-sourced `exclude_ext`/`exclude_globs` errors are misattributed to CLI flags** (R11.4 only threaded the extensions label). Fix: `FilterSources` labels all four lists; `FilterConfig::build` takes it (lib-visible signature change, CHANGELOG'd). | E2 | `[filter] exclude_ext = ["..h"]` → exit 2 naming `[filter].exclude_ext`; CLI path still names `--exclude-ext` |
+| R12.9 | [x] P2 | **`--ext md --exclude-ext md` silently scans nothing with exit 0** — the R6.5d empty-list check runs before the exclusion removal (measured). Fix: fatal when the effective whitelist becomes empty after removals. | E2 | the combination → exit 2 naming both inputs |
+| R12.10 | [x] P2 | **Dead filter values accepted silently**: `--ext tar.gz` (extensions never contain `.`), `--exclude "a/b"` / `"sub/"` (dir names never contain separators) — no-op filters, the R1.24 class. Fix: reject both forms (and `.`/`..` dir names) as fatal input errors. | E2 | each dead value → exit 2; `.cache` dir names and `.cpp` extensions still accepted |
+| R12.11 | [x] P2 | **`rename` onto a symlink destination silently replaces the link, not its target** (fetch `--output`, `--report`, `diff --report`; measured), while the permission copy follows the link — inconsistent inputs. Fix: `atomic_write` refuses symlink destinations; `ensure_report_dir` refuses a symlinked report path at pre-flight. | E1 | fetch `--output` onto a symlink → error record, link + target intact; `--report` symlink → exit 2 before side effects |
+| R12.12 | [x] P2 | **Backups lose the source file's permission bits** (740 source → 644 backup, measured): `atomic_write` copies *destination* metadata, which does not exist on first backup. Fix: `backup_original` stats the source and applies its mode to the backup. | E1 | 740 source → backup mode 740; backup failure on mode-copy is a loud error record |
+| R12.13 | [x] P2 | **https→http redirect downgrades are followed and undocumented** (reqwest `Policy::limited` without `https_only`; verified against reqwest source). Fix: when the requested URL is https, build the client with `https_only(true)` so downgrades fail as `fetch_error`; http origins keep the lenient policy; DESIGN §8.4 + USAGE record the rule. | E3 | https-origin downgrade → clean `fetch_error` naming the redirect; http→http redirect following pinned by a mock test |
+| R12.14 | [x] P3 | **Derived fetch names keep percent-escapes literally** (`my%20file.cpp`, `%E6%BA%90…cpp`). Fix: percent-decode the chosen segment (falling back to the encoded form when decoding yields separators/NUL/invalid UTF-8), extension check on the decoded name; README/USAGE derived-name rules updated. | E3 | `…/my%20file.cpp` → `my file.cpp`; `…/%E6%BA%90%E7%A0%81.cpp` → `源码.cpp`; `%2F` never becomes a separator |
+| R12.15 | [x] P3 | **A terminal `206 Partial Content` is accepted as the full body** (silent truncation, the R10.2 class). Fix: refuse 206 as `fetch_error` before streaming. | E3 | mock 206 → exit 1 `fetch_error`, output untouched |
+| R12.16 | [x] P3 | **`--output` pointing at a non-regular file hangs the comparison read** (FIFO/`/dev/stdout`, no timeout). Fix: only compare against regular files; `atomic_write` also refuses existing non-regular destinations (renaming over a FIFO would silently replace it). | E3 | unix-gated FIFO fetch test → immediate error record, FIFO preserved |
+| R12.17 | [x] P3 | **`--backup-dir " "` (blank) is accepted on the CLI** while the config form is fatal and the in-code comment claims parity (`""` itself is already rejected by clap). Fix: `ensure_backup_dir` rejects empty/blank values. | E3/narrowed | `--backup-dir " "` → exit 2, nothing created |
+| R12.18 | [x] P3 | **fix's documented exit 1 is unreachable** — every convert-side issue (unknown/decode/io/encode) also fails the verify gate on the same bytes, so exit 3 always wins (encode refusals are impossible with fix's forced utf-8 target). Fix: keep the defensive branch with a comment, correct AGENT §3's matrix to `0 / 3 / 2`; `--help`'s exit-1 list stays without fix (now accurate). | X/E4 | docs matrix matches behavior; code comment explains the invariant |
+| R12.19 | [x] P3 | **`--config <existing directory>` reports "not found"** — misleading. Fix: distinguish directory/not-regular from missing. | E3/X | config dir → exit 2 naming it a directory |
+| R12.20 | [x] P3 | **`ConvertArgs::default()`/`FixArgs::default()` set `target: Some(Utf8)`**, masking `[convert].target` from the config in programmatic use (the R8.6a class). Fix: default to `None` like the parser (lib-visible, CHANGELOG'd). | X | programmatic default args + config target utf-8-bom → merged target is utf-8-bom |
+| R12.21 | [x] P3 | **`rfc3339_now_is_recent` fails on 2030-01-01** (`starts_with("202")`). Fix: parse the year and bound it `2026..=2999`. | X | test no longer time-bombed |
+| R12.22 | [x] P1 | **Test-gap wave**: R11.1's glob `[`/`{` rejection has ZERO tests (regression would reinstate the O1 hazard with a green suite); `exclude_dirs_override` untested; `Report` round-trip lacks the fetch fixture and any real-emitted-report deserialize; read-only existing backup-dir abort untested; R1.24 normalization rules untested; R9.7's "named tests" — 4 of 5 never existed (config-only include_rc conflict, non-whitelisted unreadable skip, cross-mode diff warning, ignore×hidden pruning); R10.2 bodyless refusal untested; R10.1 pipe-safety untestable (budget const not injectable → parameterize) and untested; walker root-name exemption untested; cheap P3s: help-table spawn, attribution messages, `err_chain`, reporter doctest + walker doctest assert, double-BOM three-pass e2e, bare-filename `--report` subprocess, clap conflict pair (`--ignore-file`×`--no-ignore-file`, `--url`×`--backup-dir`), stale `build_rejects_bad_glob` comment, `--threads 0` clamp. | E4 | each gap has a named test; `cargo test --all-features` green |
+
+---
+
+*ROADMAP v1.0 — R1/R2, R5–R11 record previous delivery waves; R12 tracks the
+five-lane comprehensive review of the v0.2.5 tree. R3 and R4 retain scope
+decisions.*

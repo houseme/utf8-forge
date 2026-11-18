@@ -15,13 +15,18 @@
 //! Recursive candidate collection on top of `walkdir`.
 //!
 //! ```rust
-//! use utf8_forge::filter::{FilterConfig, FilterOptions};
+//! use utf8_forge::filter::{FilterConfig, FilterOptions, FilterSources};
 //! use utf8_forge::walker::collect_files;
 //!
-//! let cfg = FilterConfig::build(&FilterOptions::default(), "--ext").unwrap();
+//! let cfg = FilterConfig::build(&FilterOptions::default(), &FilterSources::CLI).unwrap();
 //! let result = collect_files(std::path::Path::new("."), &cfg, &[], None);
-//! // `result.files` is the sorted whitelist; `result.warnings` carries
-//! // non-fatal traversal problems.
+//! // The whitelist is never empty for the default options, and walking the
+//! // crate root always finds sources (this doctest included).
+//! assert!(!cfg.extensions.is_empty());
+//! assert!(result
+//!     .files
+//!     .iter()
+//!     .any(|p| p.ends_with("walker.rs")));
 //! ```
 //!
 //! - Symlinks are never followed, neither directories nor files: a symlinked

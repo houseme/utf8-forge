@@ -52,15 +52,23 @@ const DOWNLOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(120)
 /// enforced per chunk while streaming, so an oversized body is aborted
 /// mid-download (temp deleted) instead of being buffered in full. At most
 /// `max_size` bytes are ever held in memory (the final read-back). Redirects
-/// are limited to 5; the connect timeout is 30 s and the whole download must
-/// finish within a 120 s wall-clock budget (enforced here, because the
-/// client's timeout applies per read). Bodyless success responses
-/// (204/304/3xx without a location) are refused.
+/// are limited to 5, and an `https://` request never follows a downgrade
+/// redirect to plain `http://` (the client is built with `https_only` for
+/// https origins; plain-http requests keep the lenient policy). The connect
+/// timeout is 30 s and the whole download must finish within a 120 s
+/// wall-clock budget (enforced here, because the client's timeout applies
+/// per read). Bodyless success responses (204/304/3xx without a location)
+/// and partial-content responses (206) are refused.
 pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
-    let client = reqwest::blocking::Client::builder()
+    let https_origin = reqwest::Url::parse(url).is_ok_and(|u| u.scheme() == "https");
+    let mut builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(120))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    if https_origin {
+        builder = builder.https_only(true);
+    }
+    let client = builder
         .build()
         .map_err(|e| ForgeError::Fetch(format!("client build failed: {e}")))?;
 
@@ -98,19 +106,35 @@ pub fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
             "response has no body (HTTP {status}); nothing to fetch"
         )));
     }
+    // A 206 self-declares that it carries only *part* of the resource; this
+    // tool sends no Range header, so a terminal 206 means a proxy or CDN
+    // truncated the body — refusing it beats silently transcoding half a
+    // file.
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(ForgeError::Fetch(
+            "server returned partial content (HTTP 206) for a full-body request; \
+             refusing a truncated download"
+                .into(),
+        ));
+    }
 
     // Stream the body into a unique temp file, enforcing the cap per chunk:
     // an oversized payload never accumulates in memory.
     let tmp: PathBuf = std::env::temp_dir().join(format!(".utf8-forge-fetch-{}", unique_suffix()));
-    read_body_to_temp(&mut resp, max_size, &tmp)
+    read_body_to_temp(&mut resp, max_size, DOWNLOAD_BUDGET, &tmp)
 }
 
 /// Spool a bounded body through an exclusively created temporary file.
 /// Creation failures preserve any existing path. Once created, the file is
 /// closed before cleanup on both success and error, including on Windows.
+/// `budget` bounds the whole body's wall-clock time (the client timeout
+/// fires per read, so a slow trickle would otherwise never trip it); the
+/// public fetch path passes [`DOWNLOAD_BUDGET`] and tests inject smaller
+/// values.
 fn read_body_to_temp(
     reader: &mut impl Read,
     max_size: u64,
+    budget: Duration,
     tmp: &Path,
 ) -> Result<Vec<u8>, ForgeError> {
     let file = fs::OpenOptions::new()
@@ -132,10 +156,10 @@ fn read_body_to_temp(
             // The client timeout fires per read (a slow-but-steady trickle
             // never trips it), so the tool enforces its own wall-clock
             // budget on the whole body.
-            if started.elapsed() > DOWNLOAD_BUDGET {
+            if started.elapsed() > budget {
                 return Err(ForgeError::Fetch(format!(
                     "download exceeded the {} s budget",
-                    DOWNLOAD_BUDGET.as_secs()
+                    budget.as_secs()
                 )));
             }
             let n = reader
@@ -168,10 +192,15 @@ fn read_body_to_temp(
 
 /// Derive the output path from the URL when `--output` is omitted:
 ///
-/// - last non-empty path segment with an extension is kept verbatim
-///   (`.../legacy.cpp` → `legacy.cpp`);
+/// - last non-empty path segment with an extension is kept, percent-decoded
+///   (`.../legacy.cpp` → `legacy.cpp`, `.../my%20file.cpp` → `my file.cpp`,
+///   `…/%E6%BA%90%E7%A0%81.cpp` → `源码.cpp`);
 /// - a segment without an extension gets `.utf8` appended (`.../foo` → `foo.utf8`);
 /// - no usable segment → `download.utf8`.
+///
+/// A segment whose decoding would introduce a path separator or NUL (e.g.
+/// `%2F`), or that is not valid UTF-8 when decoded, keeps its percent-encoded
+/// spelling — the encoded form is always a single safe path component.
 pub fn derive_output_path(url: &str) -> PathBuf {
     // Scan backwards so a trailing slash (`.../dir/`) cannot shadow the real
     // last segment with an empty one.
@@ -183,10 +212,58 @@ pub fn derive_output_path(url: &str) -> PathBuf {
     });
 
     match segment {
-        Some(seg) if has_extension(&seg) => PathBuf::from(seg),
-        Some(seg) => PathBuf::from(format!("{seg}.utf8")),
+        Some(seg) => {
+            let name = usable_filename(&seg);
+            if has_extension(&name) {
+                PathBuf::from(name)
+            } else {
+                PathBuf::from(format!("{name}.utf8"))
+            }
+        }
         None => PathBuf::from("download.utf8"),
     }
+}
+
+/// Percent-decode a URL path segment into a usable filename. Falls back to
+/// the raw (encoded) spelling whenever decoding would produce an empty
+/// string, a path separator, a backslash, or NUL — the encoded form is
+/// always a single path component, so it is the safe fallback.
+fn usable_filename(raw: &str) -> String {
+    let decoded = percent_decode(raw);
+    match decoded {
+        Some(name)
+            if !name.is_empty()
+                && !name.contains('/')
+                && !name.contains('\\')
+                && !name.contains('\0') =>
+        {
+            name
+        }
+        _ => raw.to_string(),
+    }
+}
+
+/// Decode `%XX` escapes into a String. Malformed escapes (a `%` not followed
+/// by two hex digits) are kept literally; a byte sequence that is not valid
+/// UTF-8 yields `None` (the caller then keeps the encoded spelling).
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex_high = (bytes[index + 1] as char).to_digit(16);
+            let hex_low = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(high), Some(low)) = (hex_high, hex_low) {
+                out.push((high * 16 + low) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// True when the last URL segment looks like a filename with an extension.
@@ -208,7 +285,13 @@ mod tests {
         let tmp = dir.path().join("fetch.tmp");
         let body = vec![b'x'; 8192 + 13];
         assert_eq!(
-            read_body_to_temp(&mut body.as_slice(), body.len() as u64, &tmp).unwrap(),
+            read_body_to_temp(
+                &mut body.as_slice(),
+                body.len() as u64,
+                DOWNLOAD_BUDGET,
+                &tmp
+            )
+            .unwrap(),
             body
         );
         assert!(!tmp.exists());
@@ -221,7 +304,7 @@ mod tests {
         // The first chunk is persisted before the second exceeds the cap.
         let body = vec![b'x'; 8193];
         assert!(matches!(
-            read_body_to_temp(&mut body.as_slice(), 8192, &tmp),
+            read_body_to_temp(&mut body.as_slice(), 8192, DOWNLOAD_BUDGET, &tmp),
             Err(ForgeError::TooLarge {
                 size: 8193,
                 max: 8192
@@ -235,13 +318,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tmp = dir.path().join("fetch.tmp");
         assert!(
-            read_body_to_temp(&mut b"".as_slice(), 0, &tmp)
+            read_body_to_temp(&mut b"".as_slice(), 0, DOWNLOAD_BUDGET, &tmp)
                 .unwrap()
                 .is_empty()
         );
         assert!(!tmp.exists());
         assert!(matches!(
-            read_body_to_temp(&mut b"x".as_slice(), 0, &tmp),
+            read_body_to_temp(&mut b"x".as_slice(), 0, DOWNLOAD_BUDGET, &tmp),
             Err(ForgeError::TooLarge { size: 1, max: 0 })
         ));
         assert!(!tmp.exists());
@@ -260,7 +343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tmp = dir.path().join("fetch.tmp");
         let mut reader = b"partial body".as_slice().chain(FailingReader);
-        let error = read_body_to_temp(&mut reader, 1024, &tmp).unwrap_err();
+        let error = read_body_to_temp(&mut reader, 1024, DOWNLOAD_BUDGET, &tmp).unwrap_err();
         assert!(
             matches!(error, ForgeError::Fetch(ref message) if message.starts_with("read body failed:"))
         );
@@ -273,7 +356,7 @@ mod tests {
         let tmp = dir.path().join("fetch.tmp");
         fs::write(&tmp, b"original").unwrap();
         let mut reader = b"download".as_slice();
-        let error = read_body_to_temp(&mut reader, 1024, &tmp).unwrap_err();
+        let error = read_body_to_temp(&mut reader, 1024, DOWNLOAD_BUDGET, &tmp).unwrap_err();
         assert!(
             matches!(error, ForgeError::Fetch(ref message) if message.starts_with("create temp file failed:"))
         );
@@ -292,7 +375,9 @@ mod tests {
         let target = dir.path().join("original.cpp");
         fs::write(&target, b"original").unwrap();
         std::os::unix::fs::symlink(&target, &tmp).unwrap();
-        assert!(read_body_to_temp(&mut b"download".as_slice(), 1024, &tmp).is_err());
+        assert!(
+            read_body_to_temp(&mut b"download".as_slice(), 1024, DOWNLOAD_BUDGET, &tmp).is_err()
+        );
         assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&target).unwrap(), b"original");
     }
@@ -352,6 +437,65 @@ mod tests {
         assert_eq!(
             derive_output_path("https://example.com/a/noext/"),
             PathBuf::from("noext.utf8")
+        );
+    }
+
+    #[test]
+    fn derive_percent_decodes_the_segment() {
+        assert_eq!(
+            derive_output_path("https://example.com/my%20file.cpp"),
+            PathBuf::from("my file.cpp")
+        );
+        assert_eq!(
+            derive_output_path("https://example.com/%E6%BA%90%E7%A0%81.cpp"),
+            PathBuf::from("源码.cpp")
+        );
+        // Malformed escapes are kept literally, never dropped.
+        assert_eq!(
+            derive_output_path("https://example.com/%zz.cpp"),
+            PathBuf::from("%zz.cpp")
+        );
+    }
+
+    #[test]
+    fn derive_keeps_encoding_when_decoding_would_be_unsafe() {
+        // %2F would decode into a path separator; the encoded spelling must
+        // stay one component instead of splitting the path.
+        assert_eq!(
+            derive_output_path("https://example.com/a%2Fb.cpp"),
+            PathBuf::from("a%2Fb.cpp")
+        );
+        // Bytes that are not valid UTF-8 when decoded keep the encoding too.
+        assert_eq!(
+            derive_output_path("https://example.com/%FF.cpp"),
+            PathBuf::from("%FF.cpp")
+        );
+    }
+
+    #[test]
+    fn wall_clock_budget_aborts_a_slow_reader() {
+        struct SlowReader;
+
+        impl Read for SlowReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(30));
+                buf[0] = b'x';
+                Ok(1)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("fetch.tmp");
+        let mut reader = SlowReader;
+        let error =
+            read_body_to_temp(&mut reader, u64::MAX, Duration::from_millis(100), &tmp).unwrap_err();
+        assert!(
+            matches!(error, ForgeError::Fetch(ref message) if message.contains("budget")),
+            "{error}"
+        );
+        assert!(
+            !tmp.exists(),
+            "temp must be cleaned up after the budget trip"
         );
     }
 }

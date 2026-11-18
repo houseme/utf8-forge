@@ -14,6 +14,13 @@
 
 //! Console output + JSON reports.
 //!
+//! ```rust
+//! use utf8_forge::reporter::rfc3339_from_secs;
+//!
+//! // Timestamps render as RFC 3339 UTC with a trailing `Z`.
+//! assert_eq!(rfc3339_from_secs(0), "1970-01-01T00:00:00Z");
+//! ```
+//!
 //! Report guarantees:
 //! - `files[]` is sorted by `path`, so audits are reproducible run to run.
 //! - Each mode serializes exactly its own summary fields via an untagged enum
@@ -530,8 +537,10 @@ mod tests {
 
     #[test]
     fn rfc3339_now_is_recent() {
-        // Sanity: current date must be after 2026-01-01 (this tool's era).
+        // Sanity bound instead of a fixed prefix: the current date must sit
+        // inside this tool's era, whenever the test runs.
         let s = rfc3339_now();
-        assert!(s.starts_with("202"), "unexpected timestamp {s}");
+        let year: u32 = s[..4].parse().expect("rfc3339 year prefix");
+        assert!((2026..=2999).contains(&year), "unexpected timestamp {s}");
     }
 }

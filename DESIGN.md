@@ -195,7 +195,9 @@ fn encode(text: &str, target: TargetEncoding) -> Result<Vec<u8>, ForgeError> {
             // cannot map (`encode_error`, exit 1; see §2.2). Legacy GB18030
             // byte spellings encode to the canonical WHATWG forms:
             // byte-different, content-equivalent, idempotent from the second
-            // pass on.
+            // pass on. `transcode_detected` additionally refuses *changed*
+            // gb18030 output that reads back as UTF-8 with different
+            // characters (see §4.4).
             let (cow, _, _) = GB18030.encode(text);
             cow.into_owned()
         }
@@ -236,6 +238,17 @@ fn encode(text: &str, target: TargetEncoding) -> Result<Vec<u8>, ForgeError> {
 Known exception: a UTF-16 file whose content begins with a second BOM (U+FEFF)
 converges in two passes — pass 1 writes the content U+FEFF as a UTF-8 BOM
 (EF BB BF), which pass 2 strips; pass 3 is a no-op.
+
+**gb18030 self-misread guard.** 1920 hanzi (all of GB2312 levels 1–2 whose
+two-byte form is also a valid UTF-8 2-byte sequence, e.g. U+4E00 一 → `D2 BB`,
+which reads back as U+04BB һ) encode to gb18030 bytes that the detector
+classifies as UTF-8 on the next run; that run would decode *different
+characters* and rewrite the file (silent corruption, exit 0). When the
+gb18030 output differs from the input and reading it back as UTF-8 then
+re-encoding would produce different bytes, `transcode_detected` refuses with
+`EncodeError` (`encode_error`, exit 1) — the same posture as the UTF-16LE NUL
+guard. Outputs that read back identically (ASCII, and outputs that are not
+valid UTF-8 at all) convert freely.
 
 ---
 
@@ -429,7 +442,15 @@ overrides via `ThreadPoolBuilder`.
 **Never truncate-then-write**: a crash mid-write destroys source code. Temp file + rename guarantees either old or new
 content, never neither.
 
-`--backup-dir` copies original bytes **before** rename, preserving relative path structure.
+`--backup-dir` copies original bytes **before** rename, preserving relative path
+structure, and carries the source file's permission bits onto the backup (a
+740 original restores as 740, not 644).
+
+An existing destination that is a symlink or not a regular file (FIFO,
+socket, device) is refused before any temp file is created: rename would
+silently replace the entry itself while the operator's target keeps stale
+content. The `--report` pre-flight refuses a symlinked report path for the
+same reason.
 
 `--dry-run` records `would_convert` without touching disk.
 
@@ -489,6 +510,21 @@ collision preserves the existing path. Temporary names use
   server that compresses unsolicited fails detection as `unknown`
 - Redirects (max 5) never change the derived output filename; use `--output`
   when a redirect renames the resource
+- An `https://` request is built with `https_only(true)`: a redirect that
+  downgrades to plain `http://` fails as a `fetch_error` instead of fetching
+  the tamperable plaintext hop. Plain-http requests keep the lenient policy
+  (http→http and http→https redirects are followed)
+- A terminal `206 Partial Content` is refused as a `fetch_error`: this tool
+  sends no `Range` header, so a 206 self-declares a truncated body
+- Bodyless successes (204/304/3xx without `Location`) are refused before
+  streaming (they would write a zero-byte file)
+- Derived output names are percent-decoded (`…/my%20file.cpp` → `my
+  file.cpp`, `…/%E6%BA%90%E7%A0%81.cpp` → `源码.cpp`); when decoding would
+  introduce a path separator or NUL, or yields non-UTF-8, the encoded
+  spelling is kept — it is always a single safe path component
+- `--report` and the output path (explicit or derived) are compared
+  canonically before the fetch; equality is fatal (exit 2) because the
+  report write would silently replace the fetched artifact
 
 ### 8.5 Security Notes
 
@@ -501,19 +537,31 @@ collision preserves the existing path. Temporary names use
 
 ```rust
 fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, ForgeError> {
-    let client = reqwest::blocking::Client::builder()
+    let https_origin = reqwest::Url::parse(url).is_ok_and(|u| u.scheme() == "https");
+    let mut builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(120))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
+        .redirect(reqwest::redirect::Policy::limited(5));
+    if https_origin {
+        builder = builder.https_only(true); // refuse https→http downgrades
+    }
+    let client = builder.build()?;
     let mut resp = client.get(url).send()?.error_for_status()?;
     // Fast path: reject before reading when Content-Length is present.
     if let Some(len) = resp.content_length() && len > max_size {
         return Err(ForgeError::TooLarge { size: len, max: max_size });
     }
+    // Bodyless successes and self-declared truncation are refused.
+    if resp.status().is_redirection() || resp.status() == NO_CONTENT
+        || resp.status() == NOT_MODIFIED {
+        return Err(ForgeError::Fetch("response has no body".into()));
+    }
+    if resp.status() == PARTIAL_CONTENT {
+        return Err(ForgeError::Fetch("partial content refused".into()));
+    }
     // The helper owns exclusive creation, streaming, rewind and cleanup.
     let tmp = std::env::temp_dir().join(format!(".utf8-forge-fetch-{}", unique_suffix()));
-    read_body_to_temp(&mut resp, max_size, &tmp)
+    read_body_to_temp(&mut resp, max_size, DOWNLOAD_BUDGET, &tmp)
 }
 
 fn derive_output_path(url: &str) -> PathBuf {
